@@ -1,5 +1,10 @@
+angl.exe
+angl-*.zip
 copilot-daemon.exe
 copilot-daemon-*.zip
 copilot-daemon-launcher.vbs
 logs/
 *.log
+nul
+web/node_modules/
+*.exe~
