@@ -93,7 +93,7 @@ func popMessage(dbPath, caller string) (*schedg.Task, *schedg.DB) {
 		return nil, nil
 	}
 	// Open by name so the state file matches what the schedg-web uses.
-	name := "angl:" + caller
+	name := "angl." + caller
 	db, err := schedg.OpenByName(name)
 	if err != nil {
 		// Fallback to direct open if not registered in config yet.

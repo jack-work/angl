@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"bytes"
 	"io"
+	"sort"
 	"log"
 	"net/http"
 	"os"
@@ -36,6 +38,9 @@ func main() {
 	mux.HandleFunc("/api/angls", srv.handleAngls)
 	mux.HandleFunc("/api/queues", srv.handleQueues)
 	mux.HandleFunc("/api/queues/", srv.handleQueueRoute)
+	mux.HandleFunc("/api/completions", srv.handleCompletions)
+	mux.HandleFunc("/api/rpc", srv.handleRPC)
+	mux.HandleFunc("/api/orchard-token", handleOrchardToken)
 	mux.Handle("/", http.FileServer(http.Dir(*webDir)))
 
 	httpSrv := &http.Server{Addr: *addr, Handler: mux}
@@ -173,6 +178,7 @@ func (s *webServer) handleQueues(w http.ResponseWriter, r *http.Request) {
 	for i, q := range queues {
 		out[i] = entry{Name: q.Name, Driver: q.Driver, Path: q.Path, Comparator: q.Comparator}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 }
@@ -342,4 +348,90 @@ func getSnapshot(name string) (*apiSnapshot, error) {
 
 	snap := db.Snapshot()
 	return convertSnap(name, snap), nil
+}
+
+func (s *webServer) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	ctx := r.URL.Query().Get("context")
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","method":"completions","params":{"context":"%s"},"id":1}`, ctx)
+	resp, err := http.Post(s.daemon+"/rpc", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	// Extract result from RPC envelope
+	var envelope struct{ Result json.RawMessage `json:"result"` }
+	json.Unmarshal(raw, &envelope)
+	w.Header().Set("Content-Type", "application/json")
+	if envelope.Result != nil {
+		w.Write(envelope.Result)
+	} else {
+		w.Write(raw)
+	}
+}
+
+func (s *webServer) handleRPC(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	s.proxyJSONBody(w, "/rpc", body)
+}
+
+func (s *webServer) proxyJSONBody(w http.ResponseWriter, path string, body []byte) {
+	resp, err := http.Post(s.daemon+path, "application/json", bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func handleOrchardToken(w http.ResponseWriter, r *http.Request) {
+	home, _ := os.UserHomeDir()
+	path := home + "/dev/orchard/main/eng/http/http-client.private.env.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(w, "token file not found", http.StatusNotFound)
+		return
+	}
+	// The file has control chars that break standard JSON parsing.
+	// Find the "local" section, then extract the ORCHARD_AUTH_TOKEN value.
+	s := string(data)
+	localIdx := strings.Index(s, `"local"`)
+	if localIdx < 0 {
+		http.Error(w, "no local section", http.StatusNotFound)
+		return
+	}
+	localSection := s[localIdx:]
+	tokenKey := `"ORCHARD_AUTH_TOKEN"`
+	keyIdx := strings.Index(localSection, tokenKey)
+	if keyIdx < 0 {
+		http.Error(w, "token key not found in local", http.StatusNotFound)
+		return
+	}
+	afterKey := localSection[keyIdx+len(tokenKey):]
+	// Skip whitespace and colon
+	qi := strings.Index(afterKey, `"`)
+	if qi < 0 { http.Error(w, "no token value", http.StatusNotFound); return }
+	tokenStart := afterKey[qi+1:]
+	// JWT tokens only contain [A-Za-z0-9._-]. Scan until we hit anything else.
+	var b strings.Builder
+	for _, c := range tokenStart {
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			b.WriteRune(c)
+		}
+		// Skip whitespace/control chars silently (line wraps)
+		// Stop at quotes or other structural chars
+		if c == '"' || c == ',' || c == '}' {
+			break
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte(b.String()))
 }

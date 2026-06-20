@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -26,6 +27,7 @@ type Daemon struct {
 	transientPath string
 	logger        *log.Logger
 	logLines      int
+	tokens        *TokenManager
 }
 
 func New(configPath string) (*Daemon, error) {
@@ -61,6 +63,7 @@ func New(configPath string) (*Daemon, error) {
 		transientPath: transientPath,
 		logger:        logger,
 		logLines:      cfg.Daemon.LogLines,
+		tokens:        NewTokenManager(cfg.Orchard, logger),
 	}, nil
 }
 
@@ -125,8 +128,10 @@ func (d *Daemon) initSchedg(name string) {
 }
 
 // anglSchedgName returns the schedg config name for an angl's message queue.
+// Uses dot separator since colon is illegal in Windows filenames (NTFS
+// treats it as an alternate data stream marker).
 func anglSchedgName(anglName string) string {
-	return "angl:" + anglName
+	return "angl." + anglName
 }
 
 // registerSchedg adds the per-angl SQLite DB to the schedg config (idempotent).
@@ -481,6 +486,241 @@ func defChanged(a, b AnglDef) bool {
 		}
 	}
 	return false
+}
+
+// CreateChat creates a new orchard conversation agent with a fresh conversation ID.
+func (d *Daemon) CreateChat(name, charge string) (map[string]string, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name required")
+	}
+
+	d.mu.RLock()
+	_, exists := d.processes[name]
+	d.mu.RUnlock()
+	if exists {
+		return map[string]string{"name": name, "status": "exists"}, nil
+	}
+
+	convID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		time.Now().UnixNano()&0xFFFFFFFF,
+		time.Now().UnixNano()>>32&0xFFFF,
+		0x4000|(time.Now().UnixNano()>>48&0x0FFF),
+		0x8000|(time.Now().UnixNano()>>60&0x3FFF),
+		time.Now().UnixNano()&0xFFFFFFFFFFFF)
+
+	if charge == "" {
+		charge = "conversation agent"
+	}
+
+	exe, _ := os.Executable()
+	def := AnglDef{
+		Command:   exe,
+		Args:      []string{"exec", name, "--cwd", filepath.Join(os.Getenv("USERPROFILE"), "dev", "orchard", "main")},
+		Enabled:   func() *bool { b := false; return &b }(),
+		Interval:  "1h",
+		Charge:    charge,
+		Tags:      []string{"conversation:" + convID},
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}
+
+	if err := d.Register(name, def); err != nil {
+		return nil, err
+	}
+	d.initSchedg(name)
+	if err := d.StartAngl(name); err != nil {
+		return nil, err
+	}
+
+	d.logger.Printf("[%s] created chat agent (conv %s)", name, convID)
+	return map[string]string{
+		"name":           name,
+		"conversation_id": convID,
+		"status":         "created",
+	}, nil
+}
+
+// Dispatch creates a new author angl for a specific schedg task, starts it, and
+// sends it a message to lease the task. Returns the angl name.
+func (d *Daemon) Dispatch(queue, taskID, cwd, runbook string) (map[string]string, error) {
+	name := fmt.Sprintf("%s-%s", queue, taskID)
+
+	// Don't create if it already exists
+	d.mu.RLock()
+	_, exists := d.processes[name]
+	d.mu.RUnlock()
+	if exists {
+		return map[string]string{"name": name, "status": "exists"}, nil
+	}
+
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+
+	// Find the angl.exe path (ourselves)
+	exe, _ := os.Executable()
+
+	args := []string{"exec", name, "--work-queue", queue}
+	if cwd != "" {
+		args = append(args, "--cwd", cwd)
+	}
+	if runbook != "" {
+		args = append(args, "--runbook", runbook)
+	}
+
+	enabled := false
+	def := AnglDef{
+		Command:   exe,
+		Args:      args,
+		Enabled:   &enabled,
+		Interval:  "30m",
+		Charge:    fmt.Sprintf("author: %s #%s", queue, taskID),
+		Tags:      []string{"schedg:" + queue},
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}
+
+	if err := d.Register(name, def); err != nil {
+		return nil, err
+	}
+	d.initSchedg(name)
+
+	// Start it
+	if err := d.StartAngl(name); err != nil {
+		return nil, err
+	}
+
+	// Send it a message to lease the specific task
+	prompt := fmt.Sprintf(
+		"Lease task #%s from queue '%s' via: schedg next %s --caller %s\n"+
+			"If the task is already in-flight for another caller, just take over monitoring.\n"+
+			"Follow the runbook and execute the task end to end.",
+		taskID, queue, queue, name)
+
+	_, err := d.enqueueMessage(name, fmt.Sprintf("Dispatch: %s #%s", queue, taskID), prompt, 5)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wake it
+	d.mu.RLock()
+	if p, ok := d.processes[name]; ok {
+		p.Wake()
+	}
+	d.mu.RUnlock()
+
+	d.logger.Printf("[%s] dispatched for %s #%s", name, queue, taskID)
+	return map[string]string{"name": name, "status": "created"}, nil
+}
+
+// SchedgOp performs a lifecycle operation on a schedg task.
+func (d *Daemon) SchedgOp(queue, id, op string) error {
+	db, err := schedg.OpenByName(queue)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	switch op {
+	case "complete":
+		if err := db.Complete(id); err != nil {
+			return err
+		}
+	case "cancel":
+		if _, err := db.Cancel(id, ""); err != nil {
+			return err
+		}
+	case "fail":
+		if err := db.Fail(id, "manual"); err != nil {
+			return err
+		}
+	case "requeue":
+		if err := db.Requeue(id); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown op %q", op)
+	}
+	return db.Save()
+}
+
+// SchedgAdd creates a new task in a schedg queue.
+func (d *Daemon) SchedgAdd(queue, title, desc string, priority int64) (string, error) {
+	db, err := schedg.OpenByName(queue)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	id, err := db.Add(context.Background(), title, schedg.TaskOpts{
+		Description: desc,
+		Priority:    priority,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := db.Save(); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// Completions returns context-appropriate completion items for the command system.
+func (d *Daemon) Completions(ctx string) interface{} {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	type item struct {
+		Value  string `json:"value"`
+		Label  string `json:"label"`
+		Detail string `json:"detail,omitempty"`
+	}
+
+	switch ctx {
+	case "angls":
+		out := make([]item, 0, len(d.processes))
+		for name, p := range d.processes {
+			st := p.Status()
+			out = append(out, item{Value: name, Label: name, Detail: st.Charge})
+		}
+		return out
+
+	case "queues":
+		queues, _ := schedg.ListQueues()
+		out := make([]item, 0, len(queues))
+		for _, q := range queues {
+			out = append(out, item{Value: q.Name, Label: q.Name, Detail: q.Driver})
+		}
+		return out
+
+	case "states":
+		return []item{
+			{Value: "running", Label: "running"},
+			{Value: "backoff", Label: "backoff"},
+			{Value: "stopped", Label: "stopped"},
+			{Value: "disabled", Label: "disabled"},
+			{Value: "failed", Label: "failed"},
+		}
+
+	case "themes":
+		return []item{
+			{Value: "crimson", Label: "crimson", Detail: "Warm parchment"},
+			{Value: "azure", Label: "azure", Detail: "Cool celestial"},
+		}
+
+	case "views":
+		return []item{
+			{Value: "angls", Label: "angls", Detail: "Angl list"},
+			{Value: "queues", Label: "queues", Detail: "Queue list"},
+		}
+
+	case "directions":
+		return []item{
+			{Value: "h", Label: "h", Detail: "Horizontal (below)"},
+			{Value: "v", Label: "v", Detail: "Vertical (right)"},
+		}
+
+	default:
+		return []item{}
+	}
 }
 
 func sortedKeys[V any](m map[string]V) []string {

@@ -7,4 +7,8 @@ logs/
 *.log
 nul
 web/node_modules/
+web/dist/
 *.exe~
+*.exe
+bridge/angl-bridge.exe
+cmd/angl-web/angl-web.exe

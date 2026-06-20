@@ -76,6 +76,12 @@ func main() {
 		})
 	case "tail":
 		err = withName(os.Args[2:], cmdTail)
+	case "install-orchard":
+		err = cmdInstallOrchard(os.Args[2:])
+	case "vpn":
+		err = cmdVPN(os.Args[2:])
+	case "exec":
+		err = cmdExec(os.Args[2:])
 	case "message":
 		err = cmdMessage(os.Args[2:])
 	case "version":
@@ -462,9 +468,15 @@ Transient:
     --charge <desc>         Description
     --tag <value>           Add a tag (repeatable, e.g. --tag schedg:orchard)
 
+Agent:
+  exec <name> [flags]                          Run one tick: drain messages, check work queue
+    --work-queue <schedg>                      Named schedg to lease from
+    --cwd <dir>                                Working directory for pi
+    --runbook <path>                           Runbook to include in work prompts
+
 Interaction:
   tail <name>               Stream stdout/stderr (ctrl+c to stop)
-  message <name> <prompt>   Send a message to an angl's endpoint
+  message <name> <prompt>   Send a message to an angl's schedg queue
 
 Other:
   version                   Print version
