@@ -59,17 +59,18 @@ func cmdExec(args []string) error {
 			break
 		}
 		handled++
-		log.Printf("leased from messages: task #%s title=%q desc=%q", task.ID, task.Title, execTrunc(task.Description))
-		log.Printf("in-flight: message task #%s", task.ID)
 		if convID != "" {
-			execSendConversation(convID, execMessageBody(task))
+			// Conversation agents: messages were already sent to Orchard by the web UI.
+			// Just mark them complete in the schedg for visibility.
+			log.Printf("completed message #%s (conversation: already sent to orchard)", task.ID)
 		} else {
+			log.Printf("leased from messages: task #%s title=%q desc=%q", task.ID, task.Title, execTrunc(task.Description))
+			log.Printf("in-flight: message task #%s", task.ID)
 			execRunPi(name, cwd, execBuildMessagePrompt(name, task))
 		}
 		db.Complete(task.ID)
 		db.Save()
 		db.Close()
-		log.Printf("completed message task #%s", task.ID)
 	}
 
 	// 2. Check work queue (resume in-flight or lease new).
