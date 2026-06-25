@@ -3,13 +3,18 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/jack-work/angl/daemon"
 	"github.com/jack-work/schedg"
 )
 
@@ -41,6 +46,9 @@ func cmdExec(args []string) error {
 		cwd, _ = os.Getwd()
 	}
 
+	// Check if this is a conversation agent by reading config + transient.
+	convID := execConversationID(name)
+
 	handled := 0
 
 	// 1. Drain message queue.
@@ -53,7 +61,11 @@ func cmdExec(args []string) error {
 		handled++
 		log.Printf("leased from messages: task #%s title=%q desc=%q", task.ID, task.Title, execTrunc(task.Description))
 		log.Printf("in-flight: message task #%s", task.ID)
-		execRunPi(name, cwd, execBuildMessagePrompt(name, task))
+		if convID != "" {
+			execSendConversation(convID, execMessageBody(task))
+		} else {
+			execRunPi(name, cwd, execBuildMessagePrompt(name, task))
+		}
 		db.Complete(task.ID)
 		db.Save()
 		db.Close()
@@ -201,4 +213,93 @@ func execTrunc(s string) string {
 		return s[:80] + "..."
 	}
 	return s
+}
+
+// execConversationID reads config and transient to find a conversation:<uuid>
+// tag for the given angl. Returns the conversation ID or empty string.
+func execConversationID(name string) string {
+	cfgPath := daemon.DefaultConfigPath()
+	cfg, err := daemon.LoadConfig(cfgPath)
+	if err != nil {
+		return ""
+	}
+	// Check config angls first, then transient.
+	if def, ok := cfg.Angls[name]; ok {
+		if id := extractConvID(def.Tags); id != "" {
+			return id
+		}
+	}
+	transient, err := daemon.LoadTransient(daemon.DefaultTransientPath())
+	if err != nil {
+		return ""
+	}
+	if def, ok := transient[name]; ok {
+		return extractConvID(def.Tags)
+	}
+	return ""
+}
+
+func extractConvID(tags []string) string {
+	for _, t := range tags {
+		if strings.HasPrefix(t, "conversation:") {
+			return strings.TrimPrefix(t, "conversation:")
+		}
+	}
+	return ""
+}
+
+// execMessageBody extracts the user's message text from a schedg task.
+func execMessageBody(task *schedg.Task) string {
+	body := task.Description
+	if body == "" {
+		body = task.Title
+	}
+	// Strip "From: ...\n\n" prefix added by daemon.Message()
+	if strings.HasPrefix(body, "From: ") {
+		if idx := strings.Index(body, "\n\n"); idx >= 0 {
+			body = body[idx+2:]
+		}
+	}
+	return body
+}
+
+// execSendConversation posts a message to the Orchard conversation API via the
+// daemon's HTTP proxy (which handles auth and TLS). Blocks until the
+// conversation turn completes (the POST returns when the agent finishes).
+func execSendConversation(convID, message string) {
+	cfgPath := daemon.DefaultConfigPath()
+	cfg, _ := daemon.LoadConfig(cfgPath)
+	port := cfg.Daemon.HTTPPort
+	if port == 0 {
+		port = 3333
+	}
+	envID := cfg.Orchard.EnvironmentID
+	if envID == "" {
+		log.Printf("error: orchard.environment_id not set in config")
+		return
+	}
+
+	url := fmt.Sprintf("http://localhost:%d/api/orchard/api/e/%s/conversation/%s",
+		port, envID, convID)
+
+	payload, _ := json.Marshal(map[string]string{
+		"message":   message,
+		"modelTier": "large",
+	})
+
+	log.Printf("sending to conversation %s: %s", convID[:8], execTrunc(message))
+
+	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("conversation POST failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode >= 400 {
+		log.Printf("conversation POST returned %d", resp.StatusCode)
+	} else {
+		log.Printf("conversation turn completed (status %d)", resp.StatusCode)
+	}
 }

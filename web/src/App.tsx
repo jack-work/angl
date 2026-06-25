@@ -42,7 +42,7 @@ type ViewType =
   | { kind: "schedg-list" }
   | { kind: "angl-detail"; name: string }
   | { kind: "schedg-detail"; queue: string }
-  | { kind: "conversation"; orchardUrl: string; envId: string; convId: string };
+  | { kind: "conversation"; orchardUrl: string; envId: string; convId: string; anglName?: string };
 
 type PaneNode =
   | { type: "leaf"; id: string; view: ViewType }
@@ -785,7 +785,7 @@ function PaneLeaf({ id, view }: { id: string; view: ViewType }) {
         {view.kind === "schedg-list" && <SchedgListView paneId={id} />}
         {view.kind === "angl-detail" && <AnglDetailView paneId={id} name={view.name} />}
         {view.kind === "schedg-detail" && <SchedgDetailView paneId={id} queue={view.queue} />}
-        {view.kind === "conversation" && <ConversationView paneId={id} orchardUrl={view.orchardUrl} envId={view.envId} convId={view.convId} />}
+        {view.kind === "conversation" && <ConversationView paneId={id} orchardUrl={view.orchardUrl} envId={view.envId} convId={view.convId} anglName={view.anglName} />}
       </div>
     </div>
   );
@@ -955,19 +955,13 @@ function AnglDetailView({ paneId, name }: { paneId: string; name: string }) {
   const sendMessage = useCallback(() => {
     if (!msgText.trim() || sending) return;
     setSending(true);
-    // Always send through the angl message queue (provides priority, wake, visibility)
-    // For conversation agents, also send directly to Orchard for immediate streaming
+    // All messages go through the schedg queue only. The angl exec bridge
+    // serializes delivery to the Orchard conversation API (or pi) so that
+    // concurrent sends cannot corrupt the conversation grain state.
     fetch("/api/rpc", { method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({jsonrpc:"2.0",method:"message",params:{name,prompt:msgText.trim(),from:"web"},id:1})
     }).then(() => { setMsgText(""); setSending(false); }).catch(() => setSending(false));
-    if (convId) {
-      // Also send to Orchard for immediate conversation streaming
-      fetch(`/api/orchard/api/e/${envId}/conversation/${convId}`, {
-        method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ message: msgText.trim(), modelTier: "large" }),
-      }).catch(() => {});
-    }
-  }, [name, msgText, sending, convId, envId]);
+  }, [name, msgText, sending]);
 
   const inflightTask = schedgSnapshot?.inflight?.[0] ?? null;
   const totalMessages = schedgSnapshot ? (schedgSnapshot.counts.ready??0)+(schedgSnapshot.counts.inflight??0)+(schedgSnapshot.counts.completed??0) : 0;
@@ -1373,7 +1367,7 @@ function ConversationStream({ envId, convId }: { envId: string; convId: string }
 // Conversation View (standalone pane)
 // ═══════════════════════════════════════════════════════════════════
 
-function ConversationView({ paneId, orchardUrl, envId, convId }: { paneId: string; orchardUrl: string; envId: string; convId: string }) {
+function ConversationView({ paneId, orchardUrl, envId, convId, anglName }: { paneId: string; orchardUrl: string; envId: string; convId: string; anglName?: string }) {
   const { setView } = useContext(DataCtx);
   const [turns, setTurns] = useState<ConvTurn[]>([]);
   const [input, setInput] = useState("");
@@ -1439,20 +1433,28 @@ function ConversationView({ paneId, orchardUrl, envId, convId }: { paneId: strin
     setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
   }, []);
 
-  // Send message
+  // Send message. If this conversation is owned by an angl, route through
+  // the schedg queue so the bridge serializes delivery and avoids corrupting
+  // the conversation grain with concurrent POSTs.
   const send = useCallback(async () => {
     if (!input.trim() || sending) return;
     setSending(true);
     try {
-      await fetch(`/api/orchard/api/e/${envId}/conversation/${convId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: input.trim(), modelTier: "large" }),
-      });
+      if (anglName) {
+        await fetch("/api/rpc", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "message", params: { name: anglName, prompt: input.trim(), from: "web" }, id: 1 }),
+        });
+      } else {
+        await fetch(`/api/orchard/api/e/${envId}/conversation/${convId}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: input.trim(), modelTier: "large" }),
+        });
+      }
       setInput("");
     } catch {}
     setSending(false);
-  }, [envId, convId, input, sending]);
+  }, [envId, convId, input, sending, anglName]);
 
   return (
     <div className="conv-pane">
