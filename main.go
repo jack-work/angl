@@ -232,13 +232,29 @@ func cmdTail(name string) error {
 
 func cmdMessage(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: angl message <name> <prompt...>")
+		return fmt.Errorf("usage: angl message <name> [--queue|--interrupt] <prompt...>")
 	}
 	name := args[0]
-	prompt := strings.Join(args[1:], " ")
+	rest := args[1:]
+	mode := "wake" // default
+	var promptParts []string
+	for _, a := range rest {
+		switch a {
+		case "--queue":
+			mode = "queue"
+		case "--interrupt":
+			mode = "interrupt"
+		default:
+			promptParts = append(promptParts, a)
+		}
+	}
+	if len(promptParts) == 0 {
+		return fmt.Errorf("prompt required")
+	}
+	prompt := strings.Join(promptParts, " ")
 	from := defaultFrom()
 
-	params := map[string]string{"name": name, "prompt": prompt, "from": from}
+	params := map[string]string{"name": name, "prompt": prompt, "from": from, "mode": mode}
 	result, err := rpcCallRaw("message", params)
 	if err != nil {
 		return err

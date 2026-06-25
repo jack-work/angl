@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 	"path/filepath"
 	"sort"
@@ -430,12 +432,21 @@ func (d *Daemon) TailOutput(name string) (*RingBuffer, error) {
 	return p.output, nil
 }
 
-func (d *Daemon) Message(name, prompt, from string) (json.RawMessage, error) {
+// MessageWithMode sends a message to an angl with the specified delivery mode:
+//   - "queue": enqueue only, agent picks it up on next heartbeat
+//   - "wake" (default): enqueue + wake (agent processes after current tick finishes)
+//   - "interrupt": enqueue + wake + for conversation agents, cancel current turn
+//     and send immediately via Orchard
+func (d *Daemon) Message(name, prompt, from, mode string) (json.RawMessage, error) {
 	d.mu.RLock()
-	_, ok := d.processes[name]
+	p, ok := d.processes[name]
 	d.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown angl %q", name)
+	}
+
+	if mode == "" {
+		mode = "wake"
 	}
 
 	title := prompt
@@ -452,18 +463,83 @@ func (d *Daemon) Message(name, prompt, from string) (json.RawMessage, error) {
 		return nil, err
 	}
 
-	d.logger.Printf("[%s] message enqueued (task %s from %s)", name, id, from)
+	d.logger.Printf("[%s] message enqueued (task %s mode=%s from=%s)", name, id, mode, from)
 
-	// Wake the process so it picks up the message immediately.
-	d.mu.RLock()
-	if p, ok := d.processes[name]; ok {
+	result := map[string]interface{}{
+		"status":  "enqueued",
+		"task_id": id,
+		"mode":    mode,
+	}
+
+	switch mode {
+	case "queue":
+		// Just enqueue, no wake.
+
+	case "interrupt":
+		// Wake + for conversation agents, send directly to Orchard now.
+		p.Wake()
+		convID := d.getConversationID(name)
+		if convID != "" {
+			go d.sendToOrchard(convID, prompt)
+			result["conversation"] = "interrupted"
+		}
+
+	default: // "wake"
 		p.Wake()
 	}
-	d.mu.RUnlock()
 
-	result := map[string]string{"status": "enqueued", "task_id": id}
 	raw, _ := json.Marshal(result)
 	return raw, nil
+}
+
+func (d *Daemon) getConversationID(name string) string {
+	// Check config angls
+	if def, ok := d.config.Angls[name]; ok {
+		for _, t := range def.Tags {
+			if strings.HasPrefix(t, "conversation:") {
+				return strings.TrimPrefix(t, "conversation:")
+			}
+		}
+	}
+	// Check transient
+	if def, ok := d.transient[name]; ok {
+		for _, t := range def.Tags {
+			if strings.HasPrefix(t, "conversation:") {
+				return strings.TrimPrefix(t, "conversation:")
+			}
+		}
+	}
+	return ""
+}
+
+func (d *Daemon) sendToOrchard(convID, message string) {
+	token, err := d.tokens.Token()
+	if err != nil {
+		d.logger.Printf("interrupt: token error: %v", err)
+		return
+	}
+	orchardURL := d.config.Orchard.URL
+	envID := d.config.Orchard.EnvironmentID
+	if orchardURL == "" || envID == "" {
+		d.logger.Printf("interrupt: orchard not configured")
+		return
+	}
+
+	url := fmt.Sprintf("%s/api/e/%s/conversation/%s", orchardURL, envID, convID)
+	body, _ := json.Marshal(map[string]string{"message": message, "modelTier": "large"})
+
+	req, _ := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := orchardHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		d.logger.Printf("interrupt: orchard error: %v", err)
+		return
+	}
+	resp.Body.Close()
+	d.logger.Printf("interrupt: sent to orchard (status %d)", resp.StatusCode)
 }
 
 type ReloadResult struct {

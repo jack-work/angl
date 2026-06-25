@@ -35,6 +35,7 @@ type messageParam struct {
 	Name   string `json:"name"`
 	Prompt string `json:"prompt"`
 	From   string `json:"from,omitempty"`
+	Mode   string `json:"mode,omitempty"` // "queue", "wake" (default), "interrupt"
 }
 
 type registerParam struct {
@@ -125,7 +126,7 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 		if err := parseParams(req.Params, &p); err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
-		data, err := d.Message(p.Name, p.Prompt, p.From)
+		data, err := d.Message(p.Name, p.Prompt, p.From, p.Mode)
 		if err != nil {
 			return rpcErr(req.ID, -32000, err.Error())
 		}
