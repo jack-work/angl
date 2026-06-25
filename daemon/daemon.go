@@ -458,6 +458,27 @@ func (d *Daemon) Message(name, prompt, from, mode string) (json.RawMessage, erro
 		desc = fmt.Sprintf("From: %s\n\n%s", from, prompt)
 	}
 
+	// Interrupt mode for conversation agents: if the process is idle, send
+	// directly to Orchard and skip the schedg queue entirely (no duplication
+	// risk). If the process is running (a turn may be in-flight), fall back
+	// to the normal enqueue+wake path to avoid concurrent conversation POSTs.
+	if mode == "interrupt" {
+		convID := d.getConversationID(name)
+		if convID != "" && !p.IsRunning() {
+			d.logger.Printf("[%s] interrupt: sending directly to orchard (process idle)", name)
+			go d.sendToOrchard(convID, prompt)
+			result := map[string]interface{}{
+				"status": "sent",
+				"mode":   "interrupt",
+			}
+			raw, _ := json.Marshal(result)
+			return raw, nil
+		}
+		// Process is running or not a conversation agent -- fall through to enqueue.
+		d.logger.Printf("[%s] interrupt: process busy, falling back to schedg", name)
+		mode = "wake"
+	}
+
 	id, err := d.enqueueMessage(name, title, desc, 1)
 	if err != nil {
 		return nil, err
@@ -474,14 +495,6 @@ func (d *Daemon) Message(name, prompt, from, mode string) (json.RawMessage, erro
 	switch mode {
 	case "queue":
 		// Just enqueue, no wake.
-
-	case "interrupt":
-		// Wake the process so it picks up the message on the next tick.
-		// Do NOT send directly to Orchard here -- that causes duplicate
-		// delivery and conversation corruption when angl exec also drains
-		// the same message from schedg.
-		p.Wake()
-
 	default: // "wake"
 		p.Wake()
 	}

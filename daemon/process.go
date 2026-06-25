@@ -132,6 +132,13 @@ func (p *Process) Stop() {
 	}
 }
 
+// IsRunning returns true if the process is currently executing (a turn may be in-flight).
+func (p *Process) IsRunning() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state == StateRunning || p.state == StateStarting
+}
+
 func (p *Process) Status() ProcessStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()

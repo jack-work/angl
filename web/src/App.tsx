@@ -952,7 +952,7 @@ function AnglDetailView({ paneId, name }: { paneId: string; name: string }) {
   const convId = convTag?.slice("conversation:".length);
   const envId = "56c322d4-942e-e277-ab14-99f4a5a4f3ab"; // TODO: from config
 
-  const sendMessage = useCallback((mode: "interrupt" | "wake" = "wake") => {
+  const sendMessage = useCallback((mode: "interrupt" | "wake" = "interrupt") => {
     if (!msgText.trim() || sending) return;
     setSending(true);
     fetch("/api/rpc", { method: "POST", headers: {"Content-Type":"application/json"},
