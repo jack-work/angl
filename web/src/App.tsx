@@ -952,7 +952,7 @@ function AnglDetailView({ paneId, name }: { paneId: string; name: string }) {
   const convId = convTag?.slice("conversation:".length);
   const envId = "56c322d4-942e-e277-ab14-99f4a5a4f3ab"; // TODO: from config
 
-  const sendMessage = useCallback((mode: "interrupt" | "wake" = "interrupt") => {
+  const sendMessage = useCallback((mode: "interrupt" | "wake" = "wake") => {
     if (!msgText.trim() || sending) return;
     setSending(true);
     fetch("/api/rpc", { method: "POST", headers: {"Content-Type":"application/json"},
@@ -1309,15 +1309,7 @@ function ConversationStream({ envId, convId }: { envId: string; convId: string }
   useEffect(() => {
     let cancelled = false;
 
-    // First try a one-shot read to get existing messages
-    fetch(`/api/orchard/api/e/${envId}/conversation/${convId}?version=0&index=0`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.messages) setTurns(data.messages);
-      })
-      .catch(() => {});
-
-    // Then connect to SSE stream for live updates
+    // Connect to SSE stream for live updates (delivers full history from version=0)
     const url = `/api/orchard/api/e/${envId}/conversation/${convId}/stream?version=0&index=0`;
     async function connect() {
       try {

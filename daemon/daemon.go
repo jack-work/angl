@@ -476,13 +476,11 @@ func (d *Daemon) Message(name, prompt, from, mode string) (json.RawMessage, erro
 		// Just enqueue, no wake.
 
 	case "interrupt":
-		// Wake + for conversation agents, send directly to Orchard now.
+		// Wake the process so it picks up the message on the next tick.
+		// Do NOT send directly to Orchard here -- that causes duplicate
+		// delivery and conversation corruption when angl exec also drains
+		// the same message from schedg.
 		p.Wake()
-		convID := d.getConversationID(name)
-		if convID != "" {
-			go d.sendToOrchard(convID, prompt)
-			result["conversation"] = "interrupted"
-		}
 
 	default: // "wake"
 		p.Wake()
