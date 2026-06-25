@@ -212,6 +212,9 @@ body::before { content: ""; position: fixed; inset: 0; background: var(--overlay
 .chat-pill-send:disabled { opacity: 0.2; cursor: default; }
 .chat-pill-queue { color: var(--gold-dim); }
 .chat-pill-queue:hover { color: var(--gold); background: var(--bg-3); }
+.chat-pill-interrupt { color: var(--accent-dim, #886); font-size: 12px; padding: 0 8px; }
+.chat-pill-interrupt:hover:not(:disabled) { color: var(--accent-bright); background: var(--bg-3); }
+.chat-pill-interrupt:disabled { opacity: 0.2; cursor: default; }
 
 /* ── In-flight Message (inside info flyout) ───────────────────── */
 .inflight-msg { margin-top: 8px; border: 1px solid var(--border); border-left: 3px solid var(--blue); padding: 6px 10px; }

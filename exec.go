@@ -21,6 +21,10 @@ import (
 // cmdExec is the integrated bridge: drains the angl's message queue, then
 // optionally leases from a work queue. The angl name IS the session ID.
 //
+// The message queue is drained completely -- including in-flight items from
+// previous crashed runs. Only when both in-flight and ready are empty does
+// the process exit (allowing the heartbeat backoff to take effect).
+//
 // Usage: angl exec <name> [--work-queue <schedg>] [--cwd <dir>] [--runbook <path>]
 func cmdExec(args []string) error {
 	if len(args) < 1 {
@@ -34,11 +38,20 @@ func cmdExec(args []string) error {
 	for i := 0; i < len(rest); i++ {
 		switch rest[i] {
 		case "--work-queue":
-			if i+1 < len(rest) { i++; workQueue = rest[i] }
+			if i+1 < len(rest) {
+				i++
+				workQueue = rest[i]
+			}
 		case "--cwd":
-			if i+1 < len(rest) { i++; cwd = rest[i] }
+			if i+1 < len(rest) {
+				i++
+				cwd = rest[i]
+			}
 		case "--runbook":
-			if i+1 < len(rest) { i++; runbook = rest[i] }
+			if i+1 < len(rest) {
+				i++
+				runbook = rest[i]
+			}
 		}
 	}
 
@@ -46,33 +59,11 @@ func cmdExec(args []string) error {
 		cwd, _ = os.Getwd()
 	}
 
-	// Check if this is a conversation agent by reading config + transient.
 	convID := execConversationID(name)
-
 	handled := 0
 
-	// 1. Drain message queue.
-	msgPath := execMsgQueuePath(name)
-	for {
-		task, db := execPopMessage(msgPath, name)
-		if task == nil {
-			break
-		}
-		handled++
-		log.Printf("leased from messages: task #%s title=%q", task.ID, task.Title)
-		log.Printf("in-flight: message task #%s", task.ID)
-		if convID != "" {
-			// Conversation agents: forward to Orchard conversation API
-			execSendConversation(convID, execMessageBody(task))
-		} else {
-			log.Printf("leased from messages: task #%s title=%q desc=%q", task.ID, task.Title, execTrunc(task.Description))
-			log.Printf("in-flight: message task #%s", task.ID)
-			execRunPi(name, cwd, execBuildMessagePrompt(name, task))
-		}
-		db.Complete(task.ID)
-		db.Save()
-		db.Close()
-	}
+	// 1. Drain message queue: in-flight first, then ready, loop until empty.
+	handled += execDrainMessages(name, cwd, convID)
 
 	// 2. Check work queue (resume in-flight or lease new).
 	if handled == 0 && workQueue != "" {
@@ -96,15 +87,48 @@ func cmdExec(args []string) error {
 	return nil
 }
 
-func execMsgQueuePath(name string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "angl", "schedg", name+".db")
+// execDrainMessages drains the per-angl schedg queue completely. It first
+// completes any in-flight items (from previous crashed runs), then leases
+// and processes ready items. The loop continues until both in-flight and
+// ready are empty -- messages enqueued while a turn is in-flight will be
+// picked up on the next iteration.
+func execDrainMessages(name, cwd, convID string) int {
+	msgPath := execMsgQueuePath(name)
+	if _, err := os.Stat(msgPath); err != nil {
+		return 0
+	}
+
+	handled := 0
+	for {
+		task, isResume, db := execNextMessage(msgPath, name)
+		if task == nil {
+			break
+		}
+		handled++
+
+		if isResume {
+			log.Printf("resuming in-flight message #%s title=%q", task.ID, task.Title)
+		} else {
+			log.Printf("leased message #%s title=%q", task.ID, task.Title)
+		}
+
+		if convID != "" {
+			execSendConversation(convID, execMessageBody(task))
+		} else {
+			execRunPi(name, cwd, execBuildMessagePrompt(name, task))
+		}
+
+		db.Complete(task.ID)
+		db.Save()
+		db.Close()
+		log.Printf("completed message #%s", task.ID)
+	}
+	return handled
 }
 
-func execPopMessage(dbPath, caller string) (*schedg.Task, *schedg.DB) {
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil, nil
-	}
+// execNextMessage returns the next message to process: in-flight items first
+// (resume from crash), then ready items. Returns nil when the queue is empty.
+func execNextMessage(dbPath, caller string) (*schedg.Task, bool, *schedg.DB) {
 	configName := "angl." + caller
 	db, err := schedg.OpenByName(configName)
 	if err != nil {
@@ -112,15 +136,30 @@ func execPopMessage(dbPath, caller string) (*schedg.Task, *schedg.DB) {
 	}
 	if err != nil {
 		log.Printf("warning: open message queue: %v", err)
-		return nil, nil
+		return nil, false, nil
 	}
+
+	// Check for in-flight items first (resume from previous crash).
+	for _, t := range db.Inflight() {
+		m := db.Meta(t.ID)
+		if m.Caller == caller {
+			return &t, true, db
+		}
+	}
+
+	// Lease the next ready item.
 	t, ok := db.NextFor(caller)
 	if !ok {
 		db.Close()
-		return nil, nil
+		return nil, false, nil
 	}
 	db.Save()
-	return &t, db
+	return &t, false, db
+}
+
+func execMsgQueuePath(name string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "angl", "schedg", name+".db")
 }
 
 func execGetOrLeaseWork(queueName, caller string) (*schedg.Task, bool, *schedg.DB) {
@@ -225,7 +264,6 @@ func execConversationID(name string) string {
 	if err != nil {
 		return ""
 	}
-	// Check config angls first, then transient.
 	if def, ok := cfg.Angls[name]; ok {
 		if id := extractConvID(def.Tags); id != "" {
 			return id

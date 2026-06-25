@@ -439,68 +439,62 @@ func (d *Daemon) TailOutput(name string) (*RingBuffer, error) {
 //     and send immediately via Orchard
 func (d *Daemon) Message(name, prompt, from, mode string) (json.RawMessage, error) {
 	d.mu.RLock()
-	p, ok := d.processes[name]
+	_, ok := d.processes[name]
 	d.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown angl %q", name)
 	}
 
 	if mode == "" {
-		mode = "wake"
-	}
-
-	title := prompt
-	if len(title) > 120 {
-		title = title[:120]
-	}
-	desc := prompt
-	if from != "" {
-		desc = fmt.Sprintf("From: %s\n\n%s", from, prompt)
-	}
-
-	// Interrupt mode for conversation agents: if the process is idle, send
-	// directly to Orchard and skip the schedg queue entirely (no duplication
-	// risk). If the process is running (a turn may be in-flight), fall back
-	// to the normal enqueue+wake path to avoid concurrent conversation POSTs.
-	if mode == "interrupt" {
-		convID := d.getConversationID(name)
-		if convID != "" && !p.IsRunning() {
-			d.logger.Printf("[%s] interrupt: sending directly to orchard (process idle)", name)
-			go d.sendToOrchard(convID, prompt)
-			result := map[string]interface{}{
-				"status": "sent",
-				"mode":   "interrupt",
-			}
-			raw, _ := json.Marshal(result)
-			return raw, nil
-		}
-		// Process is running or not a conversation agent -- fall through to enqueue.
-		d.logger.Printf("[%s] interrupt: process busy, falling back to schedg", name)
-		mode = "wake"
-	}
-
-	id, err := d.enqueueMessage(name, title, desc, 1)
-	if err != nil {
-		return nil, err
-	}
-
-	d.logger.Printf("[%s] message enqueued (task %s mode=%s from=%s)", name, id, mode, from)
-
-	result := map[string]interface{}{
-		"status":  "enqueued",
-		"task_id": id,
-		"mode":    mode,
+		mode = "schedg"
 	}
 
 	switch mode {
-	case "queue":
-		// Just enqueue, no wake.
-	default: // "wake"
-		p.Wake()
-	}
+	case "interrupt":
+		// Bypass schedg entirely. Send directly to the Orchard conversation
+		// API. This is fire-and-forget -- the caller accepts the risk of
+		// concurrent POSTs if a turn is already in-flight.
+		convID := d.getConversationID(name)
+		if convID == "" {
+			return nil, fmt.Errorf("interrupt requires a conversation agent (no conversation: tag on %q)", name)
+		}
+		d.logger.Printf("[%s] interrupt: sending directly to orchard from=%s", name, from)
+		go d.sendToOrchard(convID, prompt)
+		result := map[string]interface{}{"status": "sent", "mode": "interrupt"}
+		raw, _ := json.Marshal(result)
+		return raw, nil
 
-	raw, _ := json.Marshal(result)
-	return raw, nil
+	default: // "schedg"
+		// Enqueue to the per-angl schedg queue and wake the process. The
+		// exec bridge drains the queue serially, so messages are delivered
+		// one at a time without concurrent conversation POSTs.
+		title := prompt
+		if len(title) > 120 {
+			title = title[:120]
+		}
+		desc := prompt
+		if from != "" {
+			desc = fmt.Sprintf("From: %s\n\n%s", from, prompt)
+		}
+
+		id, err := d.enqueueMessage(name, title, desc, 1)
+		if err != nil {
+			return nil, err
+		}
+
+		d.logger.Printf("[%s] schedg: enqueued task %s from=%s", name, id, from)
+
+		// Wake the process so it drains immediately.
+		d.mu.RLock()
+		if p, ok := d.processes[name]; ok {
+			p.Wake()
+		}
+		d.mu.RUnlock()
+
+		result := map[string]interface{}{"status": "enqueued", "task_id": id, "mode": "schedg"}
+		raw, _ := json.Marshal(result)
+		return raw, nil
+	}
 }
 
 func (d *Daemon) getConversationID(name string) string {

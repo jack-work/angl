@@ -232,16 +232,14 @@ func cmdTail(name string) error {
 
 func cmdMessage(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: angl message <name> [--queue|--interrupt] <prompt...>")
+		return fmt.Errorf("usage: angl message <name> [--interrupt] <prompt...>")
 	}
 	name := args[0]
 	rest := args[1:]
-	mode := "wake" // default
+	mode := "schedg"
 	var promptParts []string
 	for _, a := range rest {
 		switch a {
-		case "--queue":
-			mode = "queue"
 		case "--interrupt":
 			mode = "interrupt"
 		default:

@@ -35,7 +35,7 @@ type messageParam struct {
 	Name   string `json:"name"`
 	Prompt string `json:"prompt"`
 	From   string `json:"from,omitempty"`
-	Mode   string `json:"mode,omitempty"` // "queue", "wake" (default), "interrupt"
+	Mode   string `json:"mode,omitempty"` // "schedg" (default) or "interrupt"
 }
 
 type registerParam struct {
