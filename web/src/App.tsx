@@ -952,14 +952,11 @@ function AnglDetailView({ paneId, name }: { paneId: string; name: string }) {
   const convId = convTag?.slice("conversation:".length);
   const envId = "56c322d4-942e-e277-ab14-99f4a5a4f3ab"; // TODO: from config
 
-  const sendMessage = useCallback(() => {
+  const sendMessage = useCallback((mode: "interrupt" | "wake" = "interrupt") => {
     if (!msgText.trim() || sending) return;
     setSending(true);
-    // All messages go through the schedg queue only. The angl exec bridge
-    // serializes delivery to the Orchard conversation API (or pi) so that
-    // concurrent sends cannot corrupt the conversation grain state.
     fetch("/api/rpc", { method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({jsonrpc:"2.0",method:"message",params:{name,prompt:msgText.trim(),from:"web"},id:1})
+      body: JSON.stringify({jsonrpc:"2.0",method:"message",params:{name,prompt:msgText.trim(),from:"web",mode},id:1})
     }).then(() => { setMsgText(""); setSending(false); }).catch(() => setSending(false));
   }, [name, msgText, sending]);
 
@@ -1027,13 +1024,21 @@ function AnglDetailView({ paneId, name }: { paneId: string; name: string }) {
       <div className="chat-bottom">
         <input className="chat-input" placeholder={`Message ${name}...`} value={msgText}
           onChange={e => setMsgText(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); sendMessage(); }}}
+          onKeyDown={e => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault(); e.stopPropagation();
+              sendMessage(e.altKey ? "wake" : "interrupt");
+            }
+          }}
           spellCheck={false} />
-        <button className="chat-pill chat-pill-send" onClick={sendMessage} disabled={sending || !msgText.trim()}>
-          {sending ? "\u2026" : "send"}
+        <button className="chat-pill chat-pill-send" onClick={() => sendMessage("interrupt")} disabled={sending || !msgText.trim()} title="Send + interrupt (Enter)">
+          {sending ? "\u2026" : "\u25B6"}
         </button>
-        <button className="chat-pill chat-pill-queue" onClick={openQueue}>
-          queue{totalMessages > 0 ? ` (${totalMessages})` : ""}
+        <button className="chat-pill chat-pill-queue" onClick={() => sendMessage("wake")} disabled={sending || !msgText.trim()} title="Queue + wake (Alt+Enter)">
+          queue
+        </button>
+        <button className="chat-pill chat-pill-view" onClick={openQueue} title="View message queue">
+          {totalMessages > 0 ? `\u2709 ${totalMessages}` : "\u2709"}
         </button>
       </div>
     </div>
