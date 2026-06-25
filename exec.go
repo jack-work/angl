@@ -59,10 +59,11 @@ func cmdExec(args []string) error {
 			break
 		}
 		handled++
+		log.Printf("leased from messages: task #%s title=%q", task.ID, task.Title)
+		log.Printf("in-flight: message task #%s", task.ID)
 		if convID != "" {
-			// Conversation agents: messages were already sent to Orchard by the web UI.
-			// Just mark them complete in the schedg for visibility.
-			log.Printf("completed message #%s (conversation: already sent to orchard)", task.ID)
+			// Conversation agents: forward to Orchard conversation API
+			execSendConversation(convID, execMessageBody(task))
 		} else {
 			log.Printf("leased from messages: task #%s title=%q desc=%q", task.ID, task.Title, execTrunc(task.Description))
 			log.Printf("in-flight: message task #%s", task.ID)
