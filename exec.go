@@ -65,6 +65,16 @@ func cmdExec(args []string) error {
 	// 1. Drain message queue: in-flight first, then ready, loop until empty.
 	handled += execDrainMessages(name, cwd, convID)
 
+	// For conversation agents with an empty queue on first-ever tick,
+	// send the charge as the inaugural message.
+	if handled == 0 && convID != "" && execIsFirstRun(name) {
+		if charge := execGetCharge(name); charge != "" {
+			log.Printf("sending charge as inaugural message")
+			execSendConversation(convID, charge)
+			handled++
+		}
+	}
+
 	// 2. Check work queue (resume in-flight or lease new).
 	if handled == 0 && workQueue != "" {
 		task, isResume, db := execGetOrLeaseWork(workQueue, name)
@@ -254,6 +264,39 @@ func execTrunc(s string) string {
 		return s[:80] + "..."
 	}
 	return s
+}
+
+// execIsFirstRun returns true if the agent has never completed a task or
+// sent a charge. Uses a marker file to track.
+func execIsFirstRun(name string) bool {
+	home, _ := os.UserHomeDir()
+	marker := filepath.Join(home, ".config", "angl", "schedg", name+".charged")
+	if _, err := os.Stat(marker); err == nil {
+		return false
+	}
+	// Mark as charged for future ticks.
+	os.WriteFile(marker, []byte("1"), 0644)
+	return true
+}
+
+// execGetCharge returns the charge string for an angl from config or transient.
+func execGetCharge(name string) string {
+	cfgPath := daemon.DefaultConfigPath()
+	cfg, err := daemon.LoadConfig(cfgPath)
+	if err != nil {
+		return ""
+	}
+	if def, ok := cfg.Angls[name]; ok && def.Charge != "" {
+		return def.Charge
+	}
+	transient, err := daemon.LoadTransient(daemon.DefaultTransientPath())
+	if err != nil {
+		return ""
+	}
+	if def, ok := transient[name]; ok {
+		return def.Charge
+	}
+	return ""
 }
 
 // execConversationID reads config and transient to find a conversation:<uuid>

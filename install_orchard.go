@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // cmdInstallOrchard publishes the Orchard service from a worktree and
@@ -32,6 +33,13 @@ func cmdInstallOrchard(args []string) error {
 	fmt.Printf("Publishing from %s\n", worktree)
 	fmt.Printf("Output: %s\n", outDir)
 
+	// Stop orchard-service first so DLLs aren't locked during publish.
+	stop := exec.Command(os.Args[0], "stop", "orchard-service")
+	stop.Stdout = os.Stdout
+	stop.Stderr = os.Stderr
+	stop.Run() // ignore error if not running
+	time.Sleep(2 * time.Second)
+
 	// dotnet publish
 	cmd := exec.Command("dotnet", "publish", project, "-c", "Release", "-o", outDir)
 	cmd.Dir = worktree
@@ -49,14 +57,13 @@ func cmdInstallOrchard(args []string) error {
 		fmt.Println("Copied appsettings.local.json")
 	}
 
-	fmt.Println("Published. Restarting orchard-service...")
+	fmt.Println("Published. Starting orchard-service...")
 
-	// Restart the angl
-	restart := exec.Command(os.Args[0], "restart", "orchard-service")
-	restart.Stdout = os.Stdout
-	restart.Stderr = os.Stderr
-	if err := restart.Run(); err != nil {
-		fmt.Printf("Warning: restart failed: %v (start manually with: angl start orchard-service)\n", err)
+	start := exec.Command(os.Args[0], "start", "orchard-service")
+	start.Stdout = os.Stdout
+	start.Stderr = os.Stderr
+	if err := start.Run(); err != nil {
+		fmt.Printf("Warning: start failed: %v (start manually with: angl start orchard-service)\n", err)
 	}
 
 	return nil
