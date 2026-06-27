@@ -215,6 +215,10 @@ body::before { content: ""; position: fixed; inset: 0; background: var(--overlay
 .chat-pill-interrupt { color: var(--accent-dim, #886); font-size: 12px; padding: 0 8px; }
 .chat-pill-interrupt:hover:not(:disabled) { color: var(--accent-bright); background: var(--bg-3); }
 .chat-pill-interrupt:disabled { opacity: 0.2; cursor: default; }
+.conv-pi-info { display: flex; gap: 8px; align-items: center; padding: 4px 12px; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-2); border-bottom: 1px solid var(--border); background: var(--bg-1); }
+.conv-pi-label { color: var(--accent-dim, #886); font-weight: 600; }
+.conv-pi-session { font-family: var(--mono); color: var(--text-3); cursor: default; }
+.conv-pi-pid { font-family: var(--mono); color: var(--gold-dim, #a96); cursor: default; }
 
 /* ── In-flight Message (inside info flyout) ───────────────────── */
 .inflight-msg { margin-top: 8px; border: 1px solid var(--border); border-left: 3px solid var(--blue); padding: 6px 10px; }

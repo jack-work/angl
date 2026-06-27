@@ -1302,9 +1302,47 @@ function ConversationStream({ envId, convId }: { envId: string; convId: string }
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [piSessionId, setPiSessionId] = useState<string|null>(null);
+  const [piPid, setPiPid] = useState<number|null>(null);
 
   // Expose reconnect trigger for parent to call after sending
   (ConversationStream as any)._reconnect = () => setReconnectKey(k => k + 1);
+
+  // Subscribe to metadata stream for pi session info
+  useEffect(() => {
+    let cancelled = false;
+    async function connectMeta() {
+      try {
+        const resp = await fetch(`/api/orchard/api/e/${envId}/conversation/${convId}/metadata/stream`,
+          { headers: { "Accept": "text/event-stream" } });
+        if (!resp.ok || !resp.body) return;
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buffer.indexOf("\n\n")) >= 0) {
+            const frame = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            for (const line of frame.split("\n")) {
+              if (line.startsWith("data: ")) {
+                try {
+                  const meta = JSON.parse(line.slice(6));
+                  if (meta.piSessionId) setPiSessionId(meta.piSessionId);
+                  setPiPid(meta.piPid ?? null);
+                } catch {}
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+    connectMeta();
+    return () => { cancelled = true; };
+  }, [envId, convId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1351,6 +1389,13 @@ function ConversationStream({ envId, convId }: { envId: string; convId: string }
 
   return (
     <div className="conv-stream" ref={containerRef} onScroll={handleScroll}>
+      {piSessionId && (
+        <div className="conv-pi-info">
+          <span className="conv-pi-label">pi</span>
+          <span className="conv-pi-session" title={piSessionId}>{piSessionId.slice(0, 8)}</span>
+          {piPid && <span className="conv-pi-pid" title={`PID ${piPid}`}>pid:{piPid}</span>}
+        </div>
+      )}
       {!connected && turns.length === 0 && <p className="empty">Send a message to start the conversation.</p>}
       {turns.map((turn, i) => (
         <ConvTurnViewEarly key={i} turn={turn} />
