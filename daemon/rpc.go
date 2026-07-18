@@ -31,13 +31,6 @@ type nameParam struct {
 	Name string `json:"name"`
 }
 
-type messageParam struct {
-	Name   string `json:"name"`
-	Prompt string `json:"prompt"`
-	From   string `json:"from,omitempty"`
-	Mode   string `json:"mode,omitempty"` // "schedg" (default) or "interrupt"
-}
-
 type registerParam struct {
 	Name        string   `json:"name"`
 	Command     string   `json:"command"`
@@ -45,7 +38,6 @@ type registerParam struct {
 	Interval    string   `json:"interval,omitempty"`
 	MaxRestarts int      `json:"max_restarts,omitempty"`
 	Charge      string   `json:"charge,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
 }
 
 func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
@@ -121,17 +113,6 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 		}
 		return rpcOK(req.ID, "ok")
 
-	case "message":
-		var p messageParam
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		data, err := d.Message(p.Name, p.Prompt, p.From, p.Mode)
-		if err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, data)
-
 	case "register":
 		var p registerParam
 		if err := parseParams(req.Params, &p); err != nil {
@@ -143,7 +124,6 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 			Interval:    p.Interval,
 			MaxRestarts: p.MaxRestarts,
 			Charge:      p.Charge,
-			Tags:        p.Tags,
 			CreatedAt:   time.Now().Format(time.RFC3339),
 		}
 		if err := d.Register(p.Name, def); err != nil {
@@ -160,94 +140,6 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 			return rpcErr(req.ID, -32000, err.Error())
 		}
 		return rpcOK(req.ID, "unregistered")
-
-	case "create-chat":
-		var p struct {
-			Name    string `json:"name"`
-			Charge  string `json:"charge"`
-		}
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		result, err := d.CreateChat(p.Name, p.Charge)
-		if err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, result)
-
-	case "dispatch":
-		var p struct {
-			Queue   string `json:"queue"`
-			TaskID  string `json:"task_id"`
-			Cwd     string `json:"cwd"`
-			Runbook string `json:"runbook"`
-		}
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		result, err := d.Dispatch(p.Queue, p.TaskID, p.Cwd, p.Runbook)
-		if err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, result)
-
-	case "schedg-complete":
-		var p struct{ Queue string `json:"queue"`; ID string `json:"id"` }
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		if err := d.SchedgOp(p.Queue, p.ID, "complete"); err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, "ok")
-
-	case "schedg-cancel":
-		var p struct{ Queue string `json:"queue"`; ID string `json:"id"`; Reason string `json:"reason"` }
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		if err := d.SchedgOp(p.Queue, p.ID, "cancel"); err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, "ok")
-
-	case "schedg-fail":
-		var p struct{ Queue string `json:"queue"`; ID string `json:"id"`; Reason string `json:"reason"` }
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		if err := d.SchedgOp(p.Queue, p.ID, "fail"); err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, "ok")
-
-	case "schedg-requeue":
-		var p struct{ Queue string `json:"queue"`; ID string `json:"id"` }
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		if err := d.SchedgOp(p.Queue, p.ID, "requeue"); err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, "ok")
-
-	case "schedg-add":
-		var p struct{ Queue string `json:"queue"`; Title string `json:"title"`; Description string `json:"description"`; Priority int64 `json:"priority"` }
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		id, err := d.SchedgAdd(p.Queue, p.Title, p.Description, p.Priority)
-		if err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, map[string]string{"id": id})
-
-	case "completions":
-		var p struct{ Context string `json:"context"` }
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		return rpcOK(req.ID, d.Completions(p.Context))
 
 	default:
 		return rpcErr(req.ID, -32601, fmt.Sprintf("unknown method %q", req.Method))

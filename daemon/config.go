@@ -10,16 +10,12 @@ import (
 )
 
 type Config struct {
-	Daemon  DaemonConfig       `json:"daemon"`
-	Links   LinksConfig        `json:"links,omitempty"`
-	Orchard OrchardConfig      `json:"orchard,omitempty"`
-	Angls   map[string]AnglDef `json:"angls"`
+	Daemon DaemonConfig       `json:"daemon"`
+	Angls  map[string]AnglDef `json:"angls"`
 }
 
 type DaemonConfig struct {
 	HTTPPort int    `json:"http_port,omitempty"`
-	WebPort  int    `json:"web_port,omitempty"` // unified web UI port (default 4343)
-	WebDir   string `json:"web_dir,omitempty"`  // path to web/dist
 	LogLines int    `json:"log_lines,omitempty"`
 }
 
@@ -32,23 +28,7 @@ type AnglDef struct {
 	MaxRestarts  int          `json:"max_restarts,omitempty"`
 	KillExisting bool         `json:"kill_existing,omitempty"`
 	Charge       string       `json:"charge,omitempty"`
-	Tags         []string     `json:"tags,omitempty"`
 	CreatedAt    string       `json:"created_at,omitempty"`
-}
-
-type LinksConfig struct {
-	SchedgURL string `json:"schedg_url,omitempty"`
-	AnglURL   string `json:"angl_url,omitempty"`
-}
-
-type OrchardConfig struct {
-	URL           string `json:"url,omitempty"`           // e.g. https://forintracommuseonly.localhost:50772
-	EnvironmentID string `json:"environment_id,omitempty"` // Power Platform env GUID
-	Tenant        string `json:"tenant,omitempty"`         // msft, aurora, custom
-	TenantID      string `json:"tenant_id,omitempty"`      // custom tenant GUID (when tenant=custom)
-	Environment   string `json:"environment,omitempty"`    // test or prod (for token scope)
-	Username      string `json:"username,omitempty"`       // UPN for token acquisition
-	TokensUtilExe string `json:"tokens_util_exe,omitempty"` // path to TokensUtil.exe
 }
 
 type EndpointDef struct {
@@ -105,9 +85,6 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Daemon.HTTPPort == 0 {
 		cfg.Daemon.HTTPPort = 3333
-	}
-	if cfg.Daemon.WebPort == 0 {
-		cfg.Daemon.WebPort = 4343
 	}
 	if cfg.Daemon.LogLines == 0 {
 		cfg.Daemon.LogLines = 1000

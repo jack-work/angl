@@ -11,17 +11,18 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"os/user"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/jack-work/angl/daemon"
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
+	"golang.org/x/term"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 const (
 	detachedProcess = 0x00000008
@@ -76,14 +77,12 @@ func main() {
 		})
 	case "tail":
 		err = withName(os.Args[2:], cmdTail)
-	case "install-orchard":
-		err = cmdInstallOrchard(os.Args[2:])
 	case "vpn":
 		err = cmdVPN(os.Args[2:])
-	case "exec":
-		err = cmdExec(os.Args[2:])
-	case "message":
-		err = cmdMessage(os.Args[2:])
+	case "install":
+		err = cmdInstall()
+	case "uninstall":
+		err = cmdUninstall()
 	case "version":
 		fmt.Println("angl", version)
 	case "help", "--help", "-h":
@@ -135,6 +134,19 @@ func cmdDaemon(args []string) error {
 		return err
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			panicLog := fmt.Sprintf("[angld] PANIC: %v\n", r)
+			os.Stderr.WriteString(panicLog)
+			logPath := daemon.DefaultConfigDir() + "/logs/angld-panic.log"
+			if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+				f.WriteString(time.Now().Format(time.RFC3339) + " " + panicLog)
+				f.Close()
+			}
+			os.Exit(1)
+		}
+	}()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -154,6 +166,7 @@ func cmdList(asJSON bool) error {
 		fmt.Println(string(result))
 		return nil
 	}
+	enrichCommands(statuses)
 
 	if len(statuses) == 0 {
 		fmt.Println("no angls configured")
@@ -166,36 +179,193 @@ func cmdList(asJSON bool) error {
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATE\tPID\tUPTIME\tLIFETIME\tRESTARTS\tCHARGE")
-	for _, s := range statuses {
-		pid := "-"
-		if s.PID > 0 {
-			pid = fmt.Sprintf("%d", s.PID)
-		}
-		uptime := "-"
-		if s.Uptime != "" {
-			uptime = s.Uptime
-		}
-		lifetime := "-"
-		if s.Lifetime != "" {
-			lifetime = s.Lifetime
-		}
-		restarts := fmt.Sprintf("%d", s.Restarts)
-		if s.MaxRestarts > 0 {
-			restarts = fmt.Sprintf("%d/%d", s.Restarts, s.MaxRestarts)
-		}
-		charge := s.Charge
-		if len(charge) > 50 {
-			charge = charge[:50] + "..."
-		}
-		if charge == "" {
-			charge = "-"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			s.Name, s.State, pid, uptime, lifetime, restarts, charge)
+	width := termWidth()
+
+	// Narrow: NAME + STATE only
+	// Medium: + PID + UPTIME + RESTARTS
+	// Wide:   + COMMAND
+	// Extra-wide: + CHARGE
+	showExtras := width >= 60
+	showCommand := width >= 90
+	showCharge := width >= 150
+
+	t := table.NewWriter()
+	t.SetOutputMirror(os.Stdout)
+	style := table.StyleRounded
+	style.Size.WidthMax = width
+	t.SetStyle(style)
+
+	var header table.Row
+	if showExtras {
+		header = table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS"}
+	} else {
+		header = table.Row{"NAME", "STATE"}
 	}
-	return w.Flush()
+	if showCommand {
+		header = append(header, "COMMAND")
+	}
+	if showCharge {
+		header = append(header, "CHARGE")
+	}
+	t.AppendHeader(header)
+
+	// NAME, STATE, PID, UPTIME, RESTARTS, padding, and borders consume
+	// roughly 80 columns. Give the remaining space to COMMAND, or split it
+	// with CHARGE on extra-wide terminals.
+	variableWidth := width - 80
+	if variableWidth < 15 {
+		variableWidth = 15
+	}
+	commandMax := variableWidth
+	chargeMax := 0
+	if showCharge {
+		commandMax = variableWidth * 3 / 5
+		chargeMax = variableWidth - commandMax
+	}
+	if commandMax > 100 {
+		commandMax = 100
+	}
+	if chargeMax > 60 {
+		chargeMax = 60
+	}
+
+	nameMax := 25
+	if !showExtras {
+		nameMax = width - 16 // NAME + STATE + borders
+		if nameMax < 10 {
+			nameMax = 10
+		}
+	}
+
+	for _, s := range statuses {
+		state := string(s.State)
+		switch s.State {
+		case "running":
+			state = text.FgGreen.Sprint(s.State)
+		case "failed":
+			state = text.FgRed.Sprint(s.State)
+		case "backoff":
+			state = text.FgYellow.Sprint(s.State)
+		case "disabled":
+			state = text.Faint.Sprint(s.State)
+		}
+
+		var row table.Row
+		if showExtras {
+			pid := "-"
+			if s.PID > 0 {
+				pid = fmt.Sprintf("%d", s.PID)
+			}
+			uptime := "-"
+			if s.Uptime != "" {
+				uptime = s.Uptime
+			} else if s.Lifetime != "" {
+				uptime = s.Lifetime
+			}
+			restarts := fmt.Sprintf("%d", s.Restarts)
+			if s.MaxRestarts > 0 {
+				restarts = fmt.Sprintf("%d/%d", s.Restarts, s.MaxRestarts)
+			}
+			row = table.Row{s.Name, state, pid, uptime, restarts}
+		} else {
+			row = table.Row{s.Name, state}
+		}
+		if showCommand {
+			row = append(row, sanitizeCell(formatCommand(s.Command, s.Args), commandMax))
+		}
+		if showCharge {
+			row = append(row, sanitizeCell(s.Charge, chargeMax))
+		}
+		t.AppendRow(row)
+	}
+
+	var cols []table.ColumnConfig
+	cols = append(cols, table.ColumnConfig{Number: 1, WidthMax: nameMax})
+	if showExtras {
+		cols = append(cols,
+			table.ColumnConfig{Number: 3, Align: text.AlignRight},
+			table.ColumnConfig{Number: 4, Align: text.AlignRight},
+			table.ColumnConfig{Number: 5, Align: text.AlignRight},
+		)
+		if showCommand {
+			cols = append(cols, table.ColumnConfig{Number: 6, WidthMax: commandMax})
+		}
+		if showCharge {
+			cols = append(cols, table.ColumnConfig{Number: 7, WidthMax: chargeMax})
+		}
+	} else {
+		if showCommand {
+			cols = append(cols, table.ColumnConfig{Number: 3, WidthMax: commandMax})
+		}
+		if showCharge {
+			cols = append(cols, table.ColumnConfig{Number: 4, WidthMax: chargeMax})
+		}
+	}
+	t.SetColumnConfigs(cols)
+
+	t.Render()
+	return nil
+}
+
+func termWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 120
+	}
+	return w
+}
+
+func enrichCommands(statuses []daemon.ProcessStatus) {
+	defs := make(map[string]daemon.AnglDef)
+	if transient, err := daemon.LoadTransient(daemon.DefaultTransientPath()); err == nil {
+		for name, def := range transient {
+			defs[name] = def
+		}
+	}
+	if cfg, err := daemon.LoadConfig(daemon.DefaultConfigPath()); err == nil {
+		for name, def := range cfg.Angls {
+			defs[name] = def // Config takes precedence over a transient name collision.
+		}
+	}
+	for i := range statuses {
+		if def, ok := defs[statuses[i].Name]; ok {
+			statuses[i].Command = def.Command
+			statuses[i].Args = def.Args
+		}
+	}
+}
+
+func formatCommand(command string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, quoteCommandPart(command))
+	for _, arg := range args {
+		parts = append(parts, quoteCommandPart(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func quoteCommandPart(part string) string {
+	if part == "" || strings.ContainsAny(part, " \t\r\n\"") {
+		return `"` + strings.ReplaceAll(part, `"`, `\"`) + `"`
+	}
+	return part
+}
+
+func sanitizeCell(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\t", " ")
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
+	}
+	if max > 0 && len(s) > max {
+		s = s[:max-3] + "..."
+	}
+	return s
 }
 
 // --- Tail ---
@@ -228,46 +398,6 @@ func cmdTail(name string) error {
 	return scanner.Err()
 }
 
-// --- Message ---
-
-func cmdMessage(args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: angl message <name> [--interrupt] <prompt...>")
-	}
-	name := args[0]
-	rest := args[1:]
-	mode := "schedg"
-	var promptParts []string
-	for _, a := range rest {
-		switch a {
-		case "--interrupt":
-			mode = "interrupt"
-		default:
-			promptParts = append(promptParts, a)
-		}
-	}
-	if len(promptParts) == 0 {
-		return fmt.Errorf("prompt required")
-	}
-	prompt := strings.Join(promptParts, " ")
-	from := defaultFrom()
-
-	params := map[string]string{"name": name, "prompt": prompt, "from": from, "mode": mode}
-	result, err := rpcCallRaw("message", params)
-	if err != nil {
-		return err
-	}
-
-	var parsed interface{}
-	if json.Unmarshal(result, &parsed) == nil {
-		pretty, _ := json.MarshalIndent(parsed, "", "  ")
-		fmt.Println(string(pretty))
-	} else {
-		fmt.Println(string(result))
-	}
-	return nil
-}
-
 // --- JSON-RPC client ---
 
 func rpcCallRaw(method string, params interface{}) (json.RawMessage, error) {
@@ -286,7 +416,6 @@ func rpcCallRaw(method string, params interface{}) (json.RawMessage, error) {
 		return nil, err
 	}
 
-	// Try named pipe first.
 	timeout := 30 * time.Second
 	conn, err := winio.DialPipe(pipeName, &timeout)
 	if err != nil {
@@ -335,6 +464,129 @@ func rpcOKMsg(method string, params interface{}, format string, args ...interfac
 	return nil
 }
 
+// --- Install / Uninstall (Task Scheduler) ---
+
+const taskName = `angld`
+
+func taskXML(exe string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>angl process supervisor daemon</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>false</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>%s</Command>
+      <Arguments>daemon</Arguments>
+    </Exec>
+  </Actions>
+</Task>`, exe)
+}
+
+func cmdInstall() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "angld-task-*.xml")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	xmlContent := taskXML(exe)
+	utf16 := utf16Encode(xmlContent)
+	tmpFile.Write(utf16)
+	tmpFile.Close()
+
+	cmd := exec.Command("schtasks.exe",
+		"/Create",
+		"/TN", taskName,
+		"/XML", tmpFile.Name(),
+		"/F",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("schtasks create: %w", err)
+	}
+
+	fmt.Printf("installed logon task %q -> %s daemon\n", taskName, exe)
+	fmt.Println("  - restarts on failure every 60s (999 attempts)")
+	fmt.Println("  - runs on battery, no timeout, no idle requirement")
+
+	if !daemon.IsDaemonRunning() {
+		fmt.Println("starting daemon...")
+		return cmdDaemon([]string{"--detach"})
+	}
+	fmt.Println("daemon already running")
+	return nil
+}
+
+func cmdUninstall() error {
+	cmd := exec.Command("schtasks.exe", "/Delete", "/TN", taskName, "/F")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("schtasks delete: %w", err)
+	}
+	fmt.Printf("removed logon task %q\n", taskName)
+	return nil
+}
+
+func utf16Encode(s string) []byte {
+	runes := []rune(s)
+	buf := []byte{0xFF, 0xFE}
+	for _, r := range runes {
+		if r <= 0xFFFF {
+			buf = append(buf, byte(r), byte(r>>8))
+		} else {
+			r -= 0x10000
+			hi := 0xD800 + (r>>10)&0x3FF
+			lo := 0xDC00 + r&0x3FF
+			buf = append(buf, byte(hi), byte(hi>>8))
+			buf = append(buf, byte(lo), byte(lo>>8))
+		}
+	}
+	return buf
+}
+
 // --- Helpers ---
 
 func withName(args []string, fn func(string) error) error {
@@ -356,23 +608,11 @@ func daemonHTTPPort() (int, error) {
 	return cfg.Daemon.HTTPPort, nil
 }
 
-func defaultFrom() string {
-	u, err := user.Current()
-	if err != nil {
-		return "angl-cli"
-	}
-	name := u.Username
-	if i := strings.LastIndex(name, `\`); i >= 0 {
-		name = name[i+1:]
-	}
-	return name
-}
-
 // --- Register ---
 
 func cmdRegister(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: angl register <name> [--interval <dur>] [--charge <desc>] -- <command> [args...]")
+		return fmt.Errorf("usage: angl register <name> [--interval <dur>] [--charge <desc>] [--max-restarts <n>] -- <command> [args...]")
 	}
 
 	name := args[0]
@@ -380,7 +620,6 @@ func cmdRegister(args []string) error {
 
 	var interval, charge string
 	var maxRestarts int
-	var tags []string
 	var cmdStart int = -1
 
 	for i := 0; i < len(rest); i++ {
@@ -406,12 +645,6 @@ func cmdRegister(args []string) error {
 			}
 			i++
 			charge = rest[i]
-		case "--tag":
-			if i+1 >= len(rest) {
-				return fmt.Errorf("--tag requires a value")
-			}
-			i++
-			tags = append(tags, rest[i])
 		default:
 			cmdStart = i
 			goto done
@@ -438,9 +671,6 @@ done:
 	}
 	if charge != "" {
 		params["charge"] = charge
-	}
-	if len(tags) > 0 {
-		params["tags"] = tags
 	}
 
 	_, err := rpcCallRaw("register", params)
@@ -477,20 +707,19 @@ Transient:
   unregister <name>                            Remove a transient angl
 
   Register flags:
-    --interval <dur>        Run periodically (e.g. 45m)
+    --interval <dur>        Run periodically (e.g. 45m, 1h)
     --max-restarts <n>      Give up after N consecutive failures (0=unlimited)
     --charge <desc>         Description
-    --tag <value>           Add a tag (repeatable, e.g. --tag schedg:orchard)
 
-Agent:
-  exec <name> [flags]                          Run one tick: drain messages, check work queue
-    --work-queue <schedg>                      Named schedg to lease from
-    --cwd <dir>                                Working directory for pi
-    --runbook <path>                           Runbook to include in work prompts
-
-Interaction:
+Observation:
   tail <name>               Stream stdout/stderr (ctrl+c to stop)
-  message <name> <prompt>   Send a message to an angl's schedg queue
+
+Startup:
+  install                   Register logon task (Task Scheduler) + start daemon
+  uninstall                 Remove logon task
+
+Utility:
+  vpn [status|connect|disconnect]
 
 Other:
   version                   Print version
@@ -498,5 +727,12 @@ Other:
 
 Config: ~/.config/angl/config.json
 Transient: ~/.config/angl/transient.json
+
+Semantics:
+  Persistent process (no interval): runs continuously, restarts on crash
+    with exponential backoff (2s -> 60s cap, resets after 2min healthy).
+
+  Heartbeat process (with interval): runs once, sleeps for interval, repeats.
+    Useful for periodic polling tasks.
 `)
 }

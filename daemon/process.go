@@ -39,6 +39,8 @@ type ProcessStatus struct {
 	Name        string       `json:"name"`
 	State       ProcessState `json:"state"`
 	Enabled     bool         `json:"enabled"`
+	Command     string       `json:"command"`
+	Args        []string     `json:"args,omitempty"`
 	PID         int          `json:"pid,omitempty"`
 	Started     string       `json:"started,omitempty"`
 	Uptime      string       `json:"uptime,omitempty"`
@@ -52,7 +54,6 @@ type ProcessStatus struct {
 	Lifetime    string       `json:"lifetime,omitempty"`
 	Endpoint    *EndpointDef `json:"endpoint,omitempty"`
 	Charge      string       `json:"charge,omitempty"`
-	Tags        []string     `json:"tags,omitempty"`
 }
 
 type Process struct {
@@ -147,12 +148,13 @@ func (p *Process) Status() ProcessStatus {
 		Name:        p.name,
 		State:       p.state,
 		Enabled:     p.def.IsEnabled(),
+		Command:     p.def.Command,
+		Args:        p.def.Args,
 		PID:         p.pid,
 		Restarts:    p.restarts,
 		MaxRestarts: p.def.MaxRestarts,
 		Interval:    p.def.Interval,
 		Charge:      p.def.Charge,
-		Tags:        p.def.Tags,
 		Endpoint:    p.def.Endpoint,
 	}
 	if !p.started.IsZero() && p.state == StateRunning {
