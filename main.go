@@ -7,22 +7,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/jack-work/angl/daemon"
-	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/jedib0t/go-pretty/v6/text"
-	"golang.org/x/term"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 const (
 	detachedProcess = 0x00000008
@@ -77,8 +76,6 @@ func main() {
 		})
 	case "tail":
 		err = withName(os.Args[2:], cmdTail)
-	case "vpn":
-		err = cmdVPN(os.Args[2:])
 	case "install":
 		err = cmdInstall()
 	case "uninstall":
@@ -163,176 +160,42 @@ func cmdList(asJSON bool) error {
 
 	var statuses []daemon.ProcessStatus
 	if err := json.Unmarshal(result, &statuses); err != nil {
-		fmt.Println(string(result))
-		return nil
+		return fmt.Errorf("decode daemon response: %w", err)
 	}
-	enrichCommands(statuses)
-
 	if len(statuses) == 0 {
 		fmt.Println("no angls configured")
 		return nil
 	}
-
 	if asJSON {
 		pretty, _ := json.MarshalIndent(statuses, "", "  ")
 		fmt.Println(string(pretty))
 		return nil
 	}
 
-	width := termWidth()
-
-	// Narrow: NAME + STATE only
-	// Medium: + PID + UPTIME + RESTARTS
-	// Wide:   + COMMAND
-	// Extra-wide: + CHARGE
-	showExtras := width >= 60
-	showCommand := width >= 90
-	showCharge := width >= 150
-
-	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	style := table.StyleRounded
-	style.Size.WidthMax = width
-	t.SetStyle(style)
-
-	var header table.Row
-	if showExtras {
-		header = table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS"}
-	} else {
-		header = table.Row{"NAME", "STATE"}
-	}
-	if showCommand {
-		header = append(header, "COMMAND")
-	}
-	if showCharge {
-		header = append(header, "CHARGE")
-	}
-	t.AppendHeader(header)
-
-	// NAME, STATE, PID, UPTIME, RESTARTS, padding, and borders consume
-	// roughly 80 columns. Give the remaining space to COMMAND, or split it
-	// with CHARGE on extra-wide terminals.
-	variableWidth := width - 80
-	if variableWidth < 15 {
-		variableWidth = 15
-	}
-	commandMax := variableWidth
-	chargeMax := 0
-	if showCharge {
-		commandMax = variableWidth * 3 / 5
-		chargeMax = variableWidth - commandMax
-	}
-	if commandMax > 100 {
-		commandMax = 100
-	}
-	if chargeMax > 60 {
-		chargeMax = 60
-	}
-
-	nameMax := 25
-	if !showExtras {
-		nameMax = width - 16 // NAME + STATE + borders
-		if nameMax < 10 {
-			nameMax = 10
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tSTATE\tPID\tUPTIME\tRESTARTS\tCOMMAND\tCHARGE")
+	for _, status := range statuses {
+		pid := "-"
+		if status.PID > 0 {
+			pid = strconv.Itoa(status.PID)
 		}
+		uptime := status.Uptime
+		if uptime == "" {
+			uptime = status.Lifetime
+		}
+		if uptime == "" {
+			uptime = "-"
+		}
+		restarts := strconv.Itoa(status.Restarts)
+		if status.MaxRestarts > 0 {
+			restarts = fmt.Sprintf("%d/%d", status.Restarts, status.MaxRestarts)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			sanitizeCell(status.Name, 30), status.State, pid, uptime, restarts,
+			sanitizeCell(formatCommand(status.Command, status.Args), 80),
+			sanitizeCell(status.Charge, 60))
 	}
-
-	for _, s := range statuses {
-		state := string(s.State)
-		switch s.State {
-		case "running":
-			state = text.FgGreen.Sprint(s.State)
-		case "failed":
-			state = text.FgRed.Sprint(s.State)
-		case "backoff":
-			state = text.FgYellow.Sprint(s.State)
-		case "disabled":
-			state = text.Faint.Sprint(s.State)
-		}
-
-		var row table.Row
-		if showExtras {
-			pid := "-"
-			if s.PID > 0 {
-				pid = fmt.Sprintf("%d", s.PID)
-			}
-			uptime := "-"
-			if s.Uptime != "" {
-				uptime = s.Uptime
-			} else if s.Lifetime != "" {
-				uptime = s.Lifetime
-			}
-			restarts := fmt.Sprintf("%d", s.Restarts)
-			if s.MaxRestarts > 0 {
-				restarts = fmt.Sprintf("%d/%d", s.Restarts, s.MaxRestarts)
-			}
-			row = table.Row{s.Name, state, pid, uptime, restarts}
-		} else {
-			row = table.Row{s.Name, state}
-		}
-		if showCommand {
-			row = append(row, sanitizeCell(formatCommand(s.Command, s.Args), commandMax))
-		}
-		if showCharge {
-			row = append(row, sanitizeCell(s.Charge, chargeMax))
-		}
-		t.AppendRow(row)
-	}
-
-	var cols []table.ColumnConfig
-	cols = append(cols, table.ColumnConfig{Number: 1, WidthMax: nameMax})
-	if showExtras {
-		cols = append(cols,
-			table.ColumnConfig{Number: 3, Align: text.AlignRight},
-			table.ColumnConfig{Number: 4, Align: text.AlignRight},
-			table.ColumnConfig{Number: 5, Align: text.AlignRight},
-		)
-		if showCommand {
-			cols = append(cols, table.ColumnConfig{Number: 6, WidthMax: commandMax})
-		}
-		if showCharge {
-			cols = append(cols, table.ColumnConfig{Number: 7, WidthMax: chargeMax})
-		}
-	} else {
-		if showCommand {
-			cols = append(cols, table.ColumnConfig{Number: 3, WidthMax: commandMax})
-		}
-		if showCharge {
-			cols = append(cols, table.ColumnConfig{Number: 4, WidthMax: chargeMax})
-		}
-	}
-	t.SetColumnConfigs(cols)
-
-	t.Render()
-	return nil
-}
-
-func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || w <= 0 {
-		return 120
-	}
-	return w
-}
-
-func enrichCommands(statuses []daemon.ProcessStatus) {
-	defs := make(map[string]daemon.AnglDef)
-	if transient, err := daemon.LoadTransient(daemon.DefaultTransientPath()); err == nil {
-		for name, def := range transient {
-			defs[name] = def
-		}
-	}
-	if cfg, err := daemon.LoadConfig(daemon.DefaultConfigPath()); err == nil {
-		for name, def := range cfg.Angls {
-			defs[name] = def // Config takes precedence over a transient name collision.
-		}
-	}
-	for i := range statuses {
-		if def, ok := defs[statuses[i].Name]; ok {
-			statuses[i].Command = def.Command
-			statuses[i].Args = def.Args
-		}
-	}
+	return w.Flush()
 }
 
 func formatCommand(command string, args []string) string {
@@ -352,18 +215,13 @@ func quoteCommandPart(part string) string {
 }
 
 func sanitizeCell(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", "")
-	s = strings.ReplaceAll(s, "\t", " ")
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
-	}
-	s = strings.TrimSpace(s)
+	s = strings.NewReplacer("\n", " ", "\r", "", "\t", " ").Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
 	if s == "" {
 		return "-"
 	}
-	if max > 0 && len(s) > max {
-		s = s[:max-3] + "..."
+	if max > 3 && len(s) > max {
+		return s[:max-3] + "..."
 	}
 	return s
 }
@@ -371,31 +229,43 @@ func sanitizeCell(s string, max int) string {
 // --- Tail ---
 
 func cmdTail(name string) error {
-	port, err := daemonHTTPPort()
-	if err != nil {
+	if err := daemon.ValidateName(name); err != nil {
 		return err
 	}
-
-	url := fmt.Sprintf("http://localhost:%d/angls/%s/tail?history=100", port, name)
-	resp, err := http.Get(url)
+	path := daemon.LogPath(name)
+	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return fmt.Errorf("open log %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer file.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("(%d) %s", resp.StatusCode, resp.Status)
+	history, err := io.ReadAll(file)
+	if err != nil {
+		return fmt.Errorf("read log: %w", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(history), "\r\n"), "\n")
+	if len(lines) > 100 {
+		lines = lines[len(lines)-100:]
+	}
+	if len(history) > 0 {
+		fmt.Println(strings.Join(lines, "\n"))
 	}
 
-	fmt.Fprintf(os.Stderr, "tailing %s (ctrl+c to stop)\n", name)
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			fmt.Println(line[6:])
+	fmt.Fprintf(os.Stderr, "tailing %s (ctrl+c to stop)\n", path)
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			fmt.Print(line)
 		}
+		if err == nil {
+			continue
+		}
+		if err != io.EOF {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	return scanner.Err()
 }
 
 // --- JSON-RPC client ---
@@ -600,14 +470,6 @@ func nameP(name string) map[string]string {
 	return map[string]string{"name": name}
 }
 
-func daemonHTTPPort() (int, error) {
-	cfg, err := daemon.LoadConfig(daemon.DefaultConfigPath())
-	if err != nil {
-		return 3333, nil
-	}
-	return cfg.Daemon.HTTPPort, nil
-}
-
 // --- Register ---
 
 func cmdRegister(args []string) error {
@@ -717,9 +579,6 @@ Observation:
 Startup:
   install                   Register logon task (Task Scheduler) + start daemon
   uninstall                 Remove logon task
-
-Utility:
-  vpn [status|connect|disconnect]
 
 Other:
   version                   Print version

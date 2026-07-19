@@ -1,14 +1,17 @@
-angl.exe
-angl-*.zip
-copilot-daemon.exe
-copilot-daemon-*.zip
-copilot-daemon-launcher.vbs
-logs/
+# Build outputs and release archives
+/angl.exe
+/angl-*.exe
+/angl-*.zip
+/*.exe
+/*.exe~
+
+# Local logs and scratch files
+/logs/
 *.log
 nul
-web/node_modules/
-web/dist/
-*.exe~
-*.exe
-bridge/angl-bridge.exe
-cmd/angl-web/angl-web.exe
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

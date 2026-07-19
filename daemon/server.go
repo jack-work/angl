@@ -5,10 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
-	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Microsoft/go-winio"
@@ -24,155 +21,38 @@ func NewServer(d *Daemon) *Server {
 	return &Server{daemon: d}
 }
 
-func (s *Server) Run(ctx context.Context, port int) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rpc", s.handleRPC)
-	mux.HandleFunc("/angls", s.handleAngls)
-	mux.HandleFunc("/angls/", s.handleAnglRoute)
-
-	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
-	}
-
-	go s.servePipe(ctx)
-
-	go func() {
-		<-ctx.Done()
-		srv.Shutdown(context.Background())
-	}()
-
-	s.daemon.logger.Printf("http :%d | pipe %s", port, pipeName)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		return err
-	}
-	return nil
-}
-
-// --- HTTP handlers ---
-
-func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	var req RPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rpcErr(nil, -32700, "parse error"))
-		return
-	}
-	resp := s.daemon.HandleRPC(req)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) handleAngls(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.daemon.List())
-}
-
-func (s *Server) handleAnglRoute(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/angls/")
-	parts := strings.SplitN(path, "/", 2)
-	name := parts[0]
-	if name == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	if len(parts) == 1 {
-		status, err := s.daemon.StatusOf(name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
-		return
-	}
-
-	if parts[1] == "tail" {
-		s.handleTail(w, r, name)
-		return
-	}
-
-	http.NotFound(w, r)
-}
-
-func (s *Server) handleTail(w http.ResponseWriter, r *http.Request, name string) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	ring, err := s.daemon.TailOutput(name)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	historyCount := 100
-	if h := r.URL.Query().Get("history"); h != "" {
-		fmt.Sscanf(h, "%d", &historyCount)
-	}
-	for _, line := range ring.History(historyCount) {
-		fmt.Fprintf(w, "data: %s\n\n", line)
-	}
-	flusher.Flush()
-
-	id, ch := ring.Subscribe()
-	defer ring.Unsubscribe(id)
-
-	for {
-		select {
-		case line, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", line)
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
-// --- Named pipe server ---
-
-func (s *Server) servePipe(ctx context.Context) {
-	l, err := winio.ListenPipe(pipeName, &winio.PipeConfig{
+// Run serves the local control API over a Windows named pipe. The pipe is the
+// only control plane: angl does not open a TCP port or expose an HTTP API.
+func (s *Server) Run(ctx context.Context) error {
+	listener, err := winio.ListenPipe(pipeName, &winio.PipeConfig{
 		InputBufferSize:  4096,
 		OutputBufferSize: 65536,
 	})
 	if err != nil {
-		s.daemon.logger.Printf("warning: pipe unavailable: %v", err)
-		return
+		return err
 	}
+	defer listener.Close()
 
 	go func() {
 		<-ctx.Done()
-		l.Close()
+		listener.Close()
 	}()
 
+	s.daemon.logger.Printf("listening on %s", pipeName)
 	for {
-		conn, err := l.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
+			s.daemon.logger.Printf("pipe accept: %v", err)
 			continue
 		}
-		go s.handlePipeConn(conn)
+		go s.handleConn(conn)
 	}
 }
 
-func (s *Server) handlePipeConn(conn net.Conn) {
+func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Minute))
 
@@ -181,11 +61,10 @@ func (s *Server) handlePipeConn(conn net.Conn) {
 		json.NewEncoder(conn).Encode(rpcErr(nil, -32700, "parse error"))
 		return
 	}
-	resp := s.daemon.HandleRPC(req)
-	json.NewEncoder(conn).Encode(resp)
+	json.NewEncoder(conn).Encode(s.daemon.HandleRPC(req))
 }
 
-// IsDaemonRunning checks if another daemon instance is already listening.
+// IsDaemonRunning checks whether another daemon owns the control pipe.
 func IsDaemonRunning() bool {
 	timeout := 2 * time.Second
 	conn, err := winio.DialPipe(pipeName, &timeout)

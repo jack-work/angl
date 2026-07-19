@@ -22,7 +22,7 @@ type Daemon struct {
 	transient     map[string]AnglDef
 	transientPath string
 	logger        *log.Logger
-	logLines      int
+	logFile       *os.File
 }
 
 func New(configPath string) (*Daemon, error) {
@@ -32,7 +32,9 @@ func New(configPath string) (*Daemon, error) {
 	}
 
 	logDir := filepath.Join(DefaultConfigDir(), "logs")
-	os.MkdirAll(logDir, 0755)
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("create log directory: %w", err)
+	}
 
 	logPath := filepath.Join(logDir, "angld.log")
 	rotateLog(logPath)
@@ -57,17 +59,20 @@ func New(configPath string) (*Daemon, error) {
 		transient:     transient,
 		transientPath: transientPath,
 		logger:        logger,
-		logLines:      cfg.Daemon.LogLines,
+		logFile:       logFile,
 	}, nil
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
-	d.logger.Printf("starting (port %d, %d angls)", d.config.Daemon.HTTPPort, len(d.config.Angls))
+	d.logger.Printf("starting (%d configured angls, %d transient angls)", len(d.config.Angls), len(d.transient))
+	if d.logFile != nil {
+		defer d.logFile.Close()
+	}
 
 	d.mu.Lock()
 	for name, def := range d.config.Angls {
-		p := NewProcess(name, def, d.logLines, d.logger)
+		p := NewProcess(name, def, d.logger)
 		d.processes[name] = p
 		if def.IsEnabled() {
 			p.Start(ctx)
@@ -78,14 +83,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.logger.Printf("[%s] transient skipped (name conflict with config)", name)
 			continue
 		}
-		p := NewProcess(name, def, d.logLines, d.logger)
+		p := NewProcess(name, def, d.logger)
 		d.processes[name] = p
 		d.logger.Printf("[%s] transient loaded (stopped)", name)
 	}
 	d.mu.Unlock()
 
 	srv := NewServer(d)
-	err := srv.Run(ctx, d.config.Daemon.HTTPPort)
+	err := srv.Run(ctx)
 
 	d.logger.Println("stopping all processes")
 	d.mu.RLock()
@@ -178,7 +183,7 @@ func (d *Daemon) Reload() (ReloadResult, error) {
 			oldDef := d.config.Angls[name]
 			if defChanged(oldDef, def) {
 				p.Stop()
-				np := NewProcess(name, def, d.logLines, d.logger)
+				np := NewProcess(name, def, d.logger)
 				d.processes[name] = np
 				if def.IsEnabled() {
 					np.Start(d.ctx)
@@ -188,7 +193,7 @@ func (d *Daemon) Reload() (ReloadResult, error) {
 				result.Unchanged = append(result.Unchanged, name)
 			}
 		} else {
-			np := NewProcess(name, def, d.logLines, d.logger)
+			np := NewProcess(name, def, d.logger)
 			d.processes[name] = np
 			if def.IsEnabled() {
 				np.Start(d.ctx)
@@ -204,10 +209,15 @@ func (d *Daemon) Reload() (ReloadResult, error) {
 
 func (d *Daemon) Enable(name string) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+
+	if _, transient := d.transient[name]; transient {
+		d.mu.Unlock()
+		return fmt.Errorf("%q is transient; use start/stop (or move it to config for auto-start)", name)
+	}
 
 	def, ok := d.config.Angls[name]
 	if !ok {
+		d.mu.Unlock()
 		return fmt.Errorf("unknown angl %q", name)
 	}
 
@@ -216,10 +226,13 @@ func (d *Daemon) Enable(name string) error {
 	d.config.Angls[name] = def
 
 	if err := SaveConfig(d.configPath, d.config); err != nil {
+		d.mu.Unlock()
 		return fmt.Errorf("save config: %w", err)
 	}
+	p := d.processes[name]
+	d.mu.Unlock()
 
-	if p, ok := d.processes[name]; ok {
+	if p != nil {
 		p.mu.Lock()
 		p.def = def
 		p.mu.Unlock()
@@ -232,10 +245,15 @@ func (d *Daemon) Enable(name string) error {
 
 func (d *Daemon) Disable(name string) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+
+	if _, transient := d.transient[name]; transient {
+		d.mu.Unlock()
+		return fmt.Errorf("%q is transient; use start/stop (or unregister it)", name)
+	}
 
 	def, ok := d.config.Angls[name]
 	if !ok {
+		d.mu.Unlock()
 		return fmt.Errorf("unknown angl %q", name)
 	}
 
@@ -244,10 +262,13 @@ func (d *Daemon) Disable(name string) error {
 	d.config.Angls[name] = def
 
 	if err := SaveConfig(d.configPath, d.config); err != nil {
+		d.mu.Unlock()
 		return fmt.Errorf("save config: %w", err)
 	}
+	p := d.processes[name]
+	d.mu.Unlock()
 
-	if p, ok := d.processes[name]; ok {
+	if p != nil {
 		p.Stop()
 		p.mu.Lock()
 		p.def = def
@@ -260,6 +281,13 @@ func (d *Daemon) Disable(name string) error {
 }
 
 func (d *Daemon) Register(name string, def AnglDef) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if err := def.Validate(); err != nil {
+		return err
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -279,7 +307,7 @@ func (d *Daemon) Register(name string, def AnglDef) error {
 		return fmt.Errorf("save transient: %w", err)
 	}
 
-	p := NewProcess(name, def, d.logLines, d.logger)
+	p := NewProcess(name, def, d.logger)
 	d.processes[name] = p
 
 	d.logger.Printf("registered transient %s", name)
@@ -311,16 +339,6 @@ func (d *Daemon) Unregister(name string) error {
 	return nil
 }
 
-func (d *Daemon) TailOutput(name string) (*RingBuffer, error) {
-	d.mu.RLock()
-	p, ok := d.processes[name]
-	d.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("unknown angl %q", name)
-	}
-	return p.output, nil
-}
-
 type ReloadResult struct {
 	Added     []string `json:"added,omitempty"`
 	Removed   []string `json:"removed,omitempty"`
@@ -329,7 +347,9 @@ type ReloadResult struct {
 }
 
 func defChanged(a, b AnglDef) bool {
-	if a.Command != b.Command || a.Interval != b.Interval || a.IsEnabled() != b.IsEnabled() {
+	if a.Command != b.Command || a.Interval != b.Interval || a.IsEnabled() != b.IsEnabled() ||
+		a.MaxRestarts != b.MaxRestarts || a.KillExisting != b.KillExisting ||
+		a.Charge != b.Charge || !endpointsEqual(a.Endpoint, b.Endpoint) {
 		return true
 	}
 	if len(a.Args) != len(b.Args) {
@@ -341,6 +361,13 @@ func defChanged(a, b AnglDef) bool {
 		}
 	}
 	return false
+}
+
+func endpointsEqual(a, b *EndpointDef) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.HTTP == b.HTTP
 }
 
 func sortedKeys[V any](m map[string]V) []string {

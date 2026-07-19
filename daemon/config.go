@@ -5,18 +5,19 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 type Config struct {
-	Daemon DaemonConfig       `json:"daemon"`
-	Angls  map[string]AnglDef `json:"angls"`
-}
-
-type DaemonConfig struct {
-	HTTPPort int    `json:"http_port,omitempty"`
-	LogLines int    `json:"log_lines,omitempty"`
+	Angls map[string]AnglDef `json:"angls"`
 }
 
 type AnglDef struct {
@@ -32,9 +33,32 @@ type AnglDef struct {
 }
 
 type EndpointDef struct {
-	HTTP   string `json:"http,omitempty"`
-	Pipe   string `json:"pipe,omitempty"`
-	Health string `json:"health,omitempty"`
+	HTTP string `json:"http,omitempty"`
+}
+
+var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+func ValidateName(name string) error {
+	if !validName.MatchString(name) {
+		return fmt.Errorf("invalid angl name %q (use letters, digits, '.', '_' or '-')", name)
+	}
+	return nil
+}
+
+func (a AnglDef) Validate() error {
+	if strings.TrimSpace(a.Command) == "" {
+		return fmt.Errorf("command is required")
+	}
+	if a.MaxRestarts < 0 {
+		return fmt.Errorf("max_restarts cannot be negative")
+	}
+	if a.Interval != "" {
+		interval, err := time.ParseDuration(a.Interval)
+		if err != nil || interval <= 0 {
+			return fmt.Errorf("invalid interval %q", a.Interval)
+		}
+	}
+	return nil
 }
 
 func (a AnglDef) IsEnabled() bool {
@@ -45,21 +69,15 @@ func (a AnglDef) Port() int {
 	if a.Endpoint == nil || a.Endpoint.HTTP == "" {
 		return 0
 	}
-	url := a.Endpoint.HTTP
-	for i := len(url) - 1; i >= 0; i-- {
-		if url[i] == ':' {
-			port := 0
-			for j := i + 1; j < len(url); j++ {
-				if url[j] >= '0' && url[j] <= '9' {
-					port = port*10 + int(url[j]-'0')
-				} else {
-					break
-				}
-			}
-			return port
-		}
+	parsed, err := url.Parse(a.Endpoint.HTTP)
+	if err != nil || parsed.Port() == "" {
+		return 0
 	}
-	return 0
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return 0
+	}
+	return port
 }
 
 func DefaultConfigDir() string {
@@ -74,6 +92,9 @@ func DefaultConfigPath() string {
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return Config{Angls: make(map[string]AnglDef)}, nil
+		}
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
@@ -83,11 +104,13 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Angls == nil {
 		cfg.Angls = make(map[string]AnglDef)
 	}
-	if cfg.Daemon.HTTPPort == 0 {
-		cfg.Daemon.HTTPPort = 3333
-	}
-	if cfg.Daemon.LogLines == 0 {
-		cfg.Daemon.LogLines = 1000
+	for name, def := range cfg.Angls {
+		if err := ValidateName(name); err != nil {
+			return Config{}, err
+		}
+		if err := def.Validate(); err != nil {
+			return Config{}, fmt.Errorf("angl %q: %w", name, err)
+		}
 	}
 	return cfg, nil
 }
@@ -97,7 +120,10 @@ func SaveConfig(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(data, '\n'))
 }
 
 func DefaultTransientPath() string {
@@ -119,6 +145,14 @@ func LoadTransient(path string) (map[string]AnglDef, error) {
 	if m == nil {
 		m = make(map[string]AnglDef)
 	}
+	for name, def := range m {
+		if err := ValidateName(name); err != nil {
+			return nil, err
+		}
+		if err := def.Validate(); err != nil {
+			return nil, fmt.Errorf("transient angl %q: %w", name, err)
+		}
+	}
 	return m, nil
 }
 
@@ -127,5 +161,38 @@ func SaveTransient(path string, m map[string]AnglDef) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(data, '\n'))
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	from, err := windows.UTF16PtrFromString(tmpPath)
+	if err != nil {
+		return err
+	}
+	to, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }

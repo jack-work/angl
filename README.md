@@ -1,107 +1,139 @@
 # angl
 
-Process supervisor for Windows. Keeps background processes running as headless daemons with automatic restart, named pipe IPC, and Task Scheduler integration.
+A small, Windows-only process supervisor for personal development services and periodic jobs.
 
-Originally built for [copilot-api](https://github.com/ericc-ch/copilot-api), but works with any command.
+Angl has two jobs:
 
-## Install
+1. **Persistent processes** — keep a command running and restart it after failure with exponential backoff.
+2. **Heartbeat jobs** — run a command, wait for a configured interval after it exits, and run it again.
+
+There is deliberately no web UI, browser asset pipeline, plug-in system, or remote API. One `angl.exe` runs a local daemon and CLI. The CLI talks to the daemon through the Windows named pipe `\\.\pipe\angld`.
+
+## Build
+
+Requirements: Windows and Go 1.26 or newer.
 
 ```powershell
-scoop bucket add angl https://github.com/jack-work/scoop-angl
-scoop install angl
+go test ./...
+go build -trimpath -ldflags "-s -w" -o angl.exe .
 ```
 
-### Prerequisites
+## Configure
 
-- Windows 10/11
-- [Node.js](https://nodejs.org/) (if supervising npx-based tools)
-
-## Configuration
-
-Create `~/.config/angl/config.json`:
+Create `$HOME\.config\angl\config.json`:
 
 ```json
 {
   "angls": {
-    "copilot-api": {
-      "command": "npx",
-      "args": ["copilot-api@latest", "start"],
-      "port": 4141,
-      "kill_existing": true
+    "my-api": {
+      "command": "C:\\tools\\my-api.exe",
+      "args": ["--port", "8080"],
+      "max_restarts": 20,
+      "charge": "Local API"
     },
-    "oracle": {
-      "command": "angl",
-      "args": ["serve", "--port", "3080"],
-      "port": 3080,
-      "charge": "Claude Code oracle — a divine counsel",
-      "station": "http://localhost:3080"
+    "daily-sync": {
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "C:\\scripts\\sync.ps1"],
+      "interval": "24h",
+      "charge": "Refresh local data"
     }
   }
 }
 ```
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `command` | *required* | Executable to run |
-| `args` | `[]` | Command arguments |
-| `port` | `0` | Port to monitor; enables conflict detection |
-| `kill_existing` | `false` | Kill existing process on port before starting |
-| `interval` | `""` | Run periodically instead of as a long-lived daemon |
-| `charge` | `""` | Description — an angel's divine charge |
-| `station` | `""` | Endpoint URL — an angel's post of duty |
+| Field | Default | Meaning |
+|---|---:|---|
+| `command` | required | Executable to launch. Use an explicit `.cmd` path when needed. |
+| `args` | `[]` | Argument array; no shell parsing is performed. |
+| `enabled` | `true` | Whether a config-defined process starts with the daemon. |
+| `interval` | unset | Go duration such as `30m` or `24h`; when set, use heartbeat mode. |
+| `max_restarts` | `0` | Persistent-mode consecutive failure limit; `0` means unlimited. |
+| `charge` | unset | Human-readable description shown by `angl ls`. |
+| `endpoint.http` | unset | URL whose explicit port identifies a possible port conflict. |
+| `kill_existing` | `false` | Kill the process listening on `endpoint.http`'s port before launch. |
 
-## Usage
+`kill_existing` is intentionally opt-in and blunt. Avoid it unless the supervised command exclusively owns that port.
 
-```powershell
-# List configured angls
-angl list
-
-# Start an angl in the background (detached, no window)
-angl start copilot-api
-
-# Query status (one angl or all)
-angl status copilot-api
-angl status
-
-# Tail live log stream via named pipe
-angl logs copilot-api
-
-# Gracefully stop (kills entire process tree)
-angl stop copilot-api
-
-# Register as a Windows logon task + start immediately
-angl install copilot-api
-
-# Remove scheduled task
-angl uninstall copilot-api
-
-# Print the station URL for an angl
-angl endpoint oracle
-
-# Start HTTP bridge for Claude Code
-angl serve --port 3080
-```
-
-## How it works
-
-- Each angl runs as a supervised child process with no visible window
-- **Named pipe IPC** (`\\.\pipe\angl-<name>`) for `status`, `stop`, and `logs`
-- `logs` streams live output via the pipe — connect from any terminal
-- Auto-restarts on crash with exponential backoff (2s → 60s cap, resets after 2min healthy)
-- Logs to `~/.config/angl/logs/<name>.log` with 10MB rotation
-- `install` registers a Windows Task Scheduler logon trigger per angl
-- `stop` uses `taskkill /t /f` to kill the entire process tree
-
-## Claude Code bridge
-
-`angl serve` starts an HTTP server that wraps `claude -p`:
-
-- `POST /message` — accepts `{"prompt":"..."}`, returns Claude's JSON response
-- `GET /health` — liveness check
-- Maintains conversation context across requests via session ID
-
-## Build from source
+## Run
 
 ```powershell
-go build -ldflags "-s -w" -o angl.exe .
+# Install the daemon as a logon task and start it now
+.\angl.exe install
+
+# Inspect and control processes
+.\angl.exe ls
+.\angl.exe status my-api
+.\angl.exe start my-api
+.\angl.exe stop my-api
+.\angl.exe restart my-api
+.\angl.exe tail my-api
+
+# Reconcile edits to config.json
+.\angl.exe reload
+
+# Persist enabled=false/true for config-defined processes
+.\angl.exe disable my-api
+.\angl.exe enable my-api
+
+# Remove the daemon's logon task
+.\angl.exe uninstall
 ```
+
+Logs live under `$HOME\.config\angl\logs`. Each process log rotates to `.prev` at 10 MiB. `tail` follows the current file directly; restart `tail` after a rotation.
+
+### Temporary registrations
+
+A registration is stored in `transient.json` but does not auto-start after daemon restart:
+
+```powershell
+.\angl.exe register scratch-api --max-restarts 5 --charge "Temporary API" -- C:\tools\api.exe --port 9000
+.\angl.exe start scratch-api
+.\angl.exe unregister scratch-api
+```
+
+Move stable definitions into `config.json` so their startup intent is explicit and versionable.
+
+## Design
+
+```text
+Windows Task Scheduler (logon trigger; restarts daemon on failure)
+  └─ angl daemon
+       ├─ named pipe \\.\pipe\angld (local CLI control)
+       ├─ persistent child processes (restart/backoff)
+       └─ heartbeat child processes (run/wait/repeat)
+```
+
+The design favors a small operational surface:
+
+- **One binary and one daemon.** Task Scheduler keeps the supervisor alive; the supervisor keeps children alive.
+- **Local-only control.** A named pipe avoids reserving a TCP port and exposing an unauthenticated HTTP service.
+- **Direct execution.** Commands are executed without a shell, reducing quoting surprises and injection risk.
+- **Whole-tree stop.** Windows `taskkill /T /F` stops descendants as well as the direct child.
+- **Simple state.** Durable definitions are JSON; transient registrations are separate; logs are ordinary files.
+
+### Intentional limitations
+
+Angl is not a service manager or production orchestrator. It does not provide dependency ordering, health-check-driven restarts, resource limits, isolated identities, secrets management, event-log integration, or zero-downtime upgrades. Heartbeat intervals are measured after a run exits and do not provide calendar/cron semantics. Child shutdown is forceful rather than graceful.
+
+Those omissions are useful boundaries. If one of them becomes essential, an existing service manager is generally a better answer than growing angl into another one.
+
+## Alternatives
+
+### Windows
+
+- **Task Scheduler** — best built-in answer for periodic tasks and simple logon/boot jobs. It can restart failed tasks, but managing several continuously running developer processes is cumbersome.
+- **Windows Services + `sc.exe` / PowerShell service cmdlets** — native and robust, but an arbitrary console program usually needs to implement the service protocol or be wrapped.
+- **WinSW** — mature XML-configured wrapper that turns an arbitrary executable into a Windows service. Prefer it when you need real service semantics.
+- **NSSM** — very easy service wrapper with restart and output redirection. Convenient, though less actively evolved than WinSW.
+- **Process Compose** — cross-platform, declarative supervision with a terminal UI, dependencies, health checks, and richer orchestration. It is the closest fit when angl becomes too small.
+- **PM2** — good if the workload is mostly Node.js and its ecosystem overhead is acceptable.
+
+### Linux
+
+- **systemd** — the default choice on most distributions for machine/user services, restart policies, dependencies, timers, logging, identities, and resource controls. Use `systemd --user` for developer-owned processes.
+- **supervisord** — straightforward process supervision with a simple configuration model; useful where systemd is unavailable or unwanted.
+- **s6 / runit / daemontools** — small, composable supervision suites with excellent process-lifecycle behavior and a steeper operational model.
+- **Process Compose** — useful for a portable, developer-oriented stack without adopting container orchestration.
+- **Docker Compose** — appropriate when process isolation and reproducible container environments matter; overkill for ordinary host executables.
+
+**Rule of thumb:** use Task Scheduler for a few timed Windows jobs, WinSW/NSSM for a real Windows service, systemd on Linux, and Process Compose when you want an easy multi-process developer stack. Angl occupies the deliberately narrow space between ad-hoc background commands and those larger tools.
