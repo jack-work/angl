@@ -43,9 +43,7 @@ func main() {
 	case "list", "ls":
 		err = cmdListArgs(os.Args[2:])
 	case "status":
-		err = withName(os.Args[2:], func(name string) error {
-			return rpcPrint("status", nameP(name))
-		})
+		err = withName(os.Args[2:], cmdStatus)
 	case "start":
 		err = withName(os.Args[2:], func(name string) error {
 			return rpcOKMsg("start", nameP(name), "started %s", name)
@@ -78,7 +76,7 @@ func main() {
 		err = cmdTailArgs(os.Args[2:])
 	case "logs":
 		err = cmdLogs(os.Args[2:])
-	case "annotate":
+	case "annotate", "metadata", "label":
 		err = cmdAnnotate(os.Args[2:])
 	case "query":
 		err = cmdQuery(os.Args[2:])
@@ -159,6 +157,25 @@ func cmdDaemon(args []string) error {
 }
 
 // --- List ---
+
+func cmdStatus(name string) error {
+	result, err := rpcCallRaw("status", nameP(name))
+	if err != nil {
+		return err
+	}
+	var status daemon.ProcessStatus
+	if err := json.Unmarshal(result, &status); err != nil {
+		return err
+	}
+	store, _ := catalog.Load(catalog.DefaultPath())
+	output := struct {
+		daemon.ProcessStatus
+		Metadata map[string]string `json:"metadata,omitempty"`
+	}{ProcessStatus: status, Metadata: cloneLabels(store.Labels[name])}
+	pretty, _ := json.MarshalIndent(output, "", "  ")
+	fmt.Println(string(pretty))
+	return nil
+}
 
 func cmdListArgs(args []string) error {
 	asJSON := false
