@@ -139,7 +139,12 @@ func New(sources []Source, opts Options) (*Tailer, error) {
 // closes after ctx is canceled and in-flight filesystem calls return.
 func (t *Tailer) Stream(ctx context.Context) <-chan Event {
 	out := make(chan Event, t.opts.EventBuffer)
-	go t.run(ctx, out)
+	ready := make(chan struct{})
+	go t.run(ctx, out, ready)
+	select {
+	case <-ready:
+	case <-ctx.Done():
+	}
 	return out
 }
 
@@ -155,7 +160,7 @@ func ReadLast(ctx context.Context, sources []Source, n int, opts Options) ([]Lin
 	return t.readLast(ctx)
 }
 
-func (t *Tailer) run(ctx context.Context, out chan<- Event) {
+func (t *Tailer) run(ctx context.Context, out chan<- Event, ready chan<- struct{}) {
 	defer close(out)
 
 	responses := make(chan pollResponse, len(t.sources))
@@ -166,7 +171,7 @@ func (t *Tailer) run(ctx context.Context, out chan<- Event) {
 	}
 
 	var sequence uint64
-	poll := func(initial bool) bool {
+	poll := func(initial bool, initialized chan<- struct{}) bool {
 		for _, request := range requests {
 			select {
 			case request <- pollRequest{initial: initial}:
@@ -180,8 +185,14 @@ func (t *Tailer) run(ctx context.Context, out chan<- Event) {
 			case response := <-responses:
 				ordered[response.index] = response
 			case <-ctx.Done():
+				if initialized != nil {
+					close(initialized)
+				}
 				return false
 			}
+		}
+		if initialized != nil {
+			close(initialized)
 		}
 		for _, response := range ordered {
 			if response.err != nil {
@@ -204,7 +215,7 @@ func (t *Tailer) run(ctx context.Context, out chan<- Event) {
 		return true
 	}
 
-	if !poll(true) {
+	if !poll(true, ready) {
 		return
 	}
 	ticker := time.NewTicker(t.opts.PollInterval)
@@ -214,7 +225,7 @@ func (t *Tailer) run(ctx context.Context, out chan<- Event) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !poll(false) {
+			if !poll(false, nil) {
 				return
 			}
 		}
