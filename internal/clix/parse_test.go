@@ -3,11 +3,11 @@ package clix
 import "testing"
 
 func TestParseLogArgs(t *testing.T) {
-	o, names, err := ParseLogArgs([]string{"api", "worker", "--format", "jsonl", "-n", "20", "-f", "--since", "5m"})
+	o, names, err := ParseLogArgs([]string{"api", "worker", "--format", "jsonl", "-n", "20", "-f"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.Format != "jsonl" || o.Lines != 20 || !o.Follow || o.Since.String() != "5m0s" || len(names) != 2 {
+	if o.Format != "jsonl" || o.Lines != 20 || !o.Follow || len(names) != 2 {
 		t.Fatalf("got %#v %#v", o, names)
 	}
 }

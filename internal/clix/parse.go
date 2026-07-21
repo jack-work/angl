@@ -4,14 +4,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type LogOptions struct {
 	Format   string
 	Lines    int
 	Follow   bool
-	Since    time.Duration
 	Selector string
 	View     string
 	NoColor  bool
@@ -46,16 +44,6 @@ func ParseLogArgs(args []string) (LogOptions, []string, error) {
 				return opts, nil, fmt.Errorf("invalid line count %q", value)
 			}
 			opts.Lines = n
-		case "--since":
-			value, err := take(arg)
-			if err != nil {
-				return opts, nil, err
-			}
-			d, err := time.ParseDuration(value)
-			if err != nil || d < 0 {
-				return opts, nil, fmt.Errorf("invalid since duration %q", value)
-			}
-			opts.Since = d
 		case "--format", "-o":
 			value, err := take(arg)
 			if err != nil {
