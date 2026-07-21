@@ -70,22 +70,23 @@ func cmdLogs(args []string) error {
 		status := statusByName[line.Source]
 		labels := cloneLabels(store.Labels[line.Source])
 		if opts.Format == "raw" {
-			_, err := fmt.Fprintln(os.Stdout, line.Text)
-			return err
+			if _, err := io.WriteString(os.Stdout, line.Text); err != nil {
+				return err
+			}
+			if line.Terminated {
+				_, err := io.WriteString(os.Stdout, "\n")
+				return err
+			}
+			return nil
 		}
 		var encoded strings.Builder
-		adapter := logcodec.NewAdapter(&encoded, logcodec.Options{
-			Metadata: logcodec.Metadata{
-				Angl: line.Source, Stream: logcodec.Stream("combined"), Charge: status.Charge,
-				PID: status.PID, Attributes: metadataAttributes(labels),
-				ResourceAttributes: map[string]any{"service.name": line.Source, "service.namespace": "angl"},
-			},
-			ParseJSON: true,
-		})
-		if _, err := adapter.Write([]byte(line.Text + "\n")); err != nil {
-			return err
-		}
-		if err := adapter.Close(); err != nil {
+		if err := logcodec.EncodeRecord(&encoded, []byte(line.Text), logcodec.RecordContext{
+			Angl: line.Source, Stream: logcodec.Combined, Charge: status.Charge,
+			Command: formatCommand(status.Command, status.Args), PID: status.PID,
+			Sequence: line.Sequence, Path: line.Path, Truncated: line.Truncated,
+			Attributes:         metadataAttributes(labels),
+			ResourceAttributes: map[string]any{"service.name": line.Source, "service.namespace": "angl"},
+		}, logcodec.Options{ParseJSON: true}); err != nil {
 			return err
 		}
 		if opts.Format == "jsonl" {
@@ -150,32 +151,62 @@ func observationStatuses() ([]daemon.ProcessStatus, error) {
 }
 
 func resolveObservationNames(explicit []string, selector, view string, statuses []daemon.ProcessStatus, store catalog.Store) ([]string, error) {
-	selected := make(map[string]bool)
-	for _, name := range explicit {
-		selected[name] = true
+	available := make(map[string]daemon.ProcessStatus, len(statuses))
+	items := make([]catalog.SelectorItem, 0, len(statuses))
+	for _, status := range statuses {
+		available[status.Name] = status
+		kind := "persistent"
+		if status.Interval != "" {
+			kind = "heartbeat"
+		}
+		items = append(items, catalog.SelectorItem{
+			Name: status.Name, State: string(status.State), Enabled: status.Enabled,
+			Kind: kind, Labels: store.Labels[status.Name],
+		})
 	}
+
+	selected := make(map[string]bool)
+	if len(explicit) == 0 {
+		for name := range available {
+			selected[name] = true
+		}
+	} else {
+		for _, name := range explicit {
+			if _, ok := available[name]; !ok {
+				return nil, fmt.Errorf("unknown angl %q", name)
+			}
+			selected[name] = true
+		}
+	}
+
+	combined := selector
 	if view != "" {
 		viewSelector, ok := store.Views[view]
 		if !ok {
 			return nil, fmt.Errorf("unknown view %q", view)
 		}
-		if selector == "" {
-			selector = viewSelector
+		if combined == "" {
+			combined = viewSelector
 		} else if viewSelector != "" {
-			selector = viewSelector + "," + selector
+			combined = viewSelector + "," + combined
 		}
 	}
-	if selector != "" {
-		parsed, err := catalog.ParseSelector(selector)
+	if combined != "" {
+		parsed, err := catalog.ParseSelector(combined)
 		if err != nil {
 			return nil, err
 		}
-		for _, status := range statuses {
-			if parsed.Matches(store.Labels[status.Name]) {
-				selected[status.Name] = true
+		matched := make(map[string]bool)
+		for _, item := range catalog.Resolve(parsed, items) {
+			matched[item.Name] = true
+		}
+		for name := range selected {
+			if !matched[name] {
+				delete(selected, name)
 			}
 		}
 	}
+
 	names := make([]string, 0, len(selected))
 	for name := range selected {
 		names = append(names, name)
@@ -184,25 +215,62 @@ func resolveObservationNames(explicit []string, selector, view string, statuses 
 	return names, nil
 }
 
-func cmdAnnotate(args []string) error {
-	name, opts, err := clix.ParseAnnotateArgs(args)
-	if err != nil {
-		return err
+func cmdLabel(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: angl label <set|unset|list> ...")
 	}
-	if _, err := rpcCallRaw("status", nameP(name)); err != nil {
-		return err
-	}
-	if err := catalog.Update(catalog.DefaultPath(), func(store *catalog.Store) error {
-		if len(opts.Set) > 0 {
-			if err := store.Annotate(name, opts.Set); err != nil {
-				return err
-			}
+	switch args[0] {
+	case "set":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: angl label set <name> key=value [key=value...]")
 		}
-		return store.RemoveLabels(name, opts.Unset...)
-	}); err != nil {
-		return err
+		name := args[1]
+		labels := make(map[string]string, len(args)-2)
+		for _, assignment := range args[2:] {
+			key, value, ok := strings.Cut(assignment, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return fmt.Errorf("invalid label assignment %q", assignment)
+			}
+			labels[strings.TrimSpace(key)] = value
+		}
+		if _, err := rpcCallRaw("status", nameP(name)); err != nil {
+			return err
+		}
+		if err := catalog.Update(catalog.DefaultPath(), func(store *catalog.Store) error {
+			return store.Annotate(name, labels)
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("labelled %s\n", name)
+	case "unset":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: angl label unset <name> key [key...]")
+		}
+		name := args[1]
+		if _, err := rpcCallRaw("status", nameP(name)); err != nil {
+			return err
+		}
+		if err := catalog.Update(catalog.DefaultPath(), func(store *catalog.Store) error {
+			return store.RemoveLabels(name, args[2:]...)
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("updated labels for %s\n", name)
+	case "list":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: angl label list <name>")
+		}
+		if _, err := rpcCallRaw("status", nameP(args[1])); err != nil {
+			return err
+		}
+		store, err := catalog.Load(catalog.DefaultPath())
+		if err != nil {
+			return err
+		}
+		fmt.Println(formatLabels(store.Labels[args[1]]))
+	default:
+		return fmt.Errorf("unknown label command %q", args[0])
 	}
-	fmt.Printf("annotated %s\n", name)
 	return nil
 }
 
@@ -235,19 +303,25 @@ func cmdQuery(args []string) error {
 	if err != nil {
 		return err
 	}
-	matches := make([]map[string]any, 0)
+	items := make([]catalog.SelectorItem, 0, len(statuses))
 	for _, status := range statuses {
-		if parsed.Matches(store.Labels[status.Name]) {
-			matches = append(matches, map[string]any{"name": status.Name, "state": status.State, "enabled": status.Enabled, "metadata": cloneLabels(store.Labels[status.Name])})
+		kind := "persistent"
+		if status.Interval != "" {
+			kind = "heartbeat"
 		}
+		items = append(items, catalog.SelectorItem{
+			Name: status.Name, State: string(status.State), Enabled: status.Enabled,
+			Kind: kind, Labels: store.Labels[status.Name],
+		})
 	}
+	matches := catalog.Resolve(parsed, items)
 	if asJSON {
 		data, _ := json.MarshalIndent(matches, "", "  ")
 		fmt.Println(string(data))
 		return nil
 	}
 	for _, match := range matches {
-		fmt.Println(match["name"])
+		fmt.Println(match.Name)
 	}
 	return nil
 }
@@ -259,10 +333,21 @@ func cmdView(args []string) error {
 	path := catalog.DefaultPath()
 	switch args[0] {
 	case "save":
-		if len(args) != 4 || args[2] != "--selector" {
-			return fmt.Errorf("usage: angl view save <name> --selector <expr>")
+		force := false
+		if len(args) == 5 && args[4] == "--force" {
+			force = true
+		} else if len(args) != 4 {
+			return fmt.Errorf("usage: angl view save <name> --selector <expr> [--force]")
 		}
-		if err := catalog.Update(path, func(store *catalog.Store) error { return store.SaveView(args[1], args[3]) }); err != nil {
+		if args[2] != "--selector" {
+			return fmt.Errorf("usage: angl view save <name> --selector <expr> [--force]")
+		}
+		if err := catalog.Update(path, func(store *catalog.Store) error {
+			if _, exists := store.Views[args[1]]; exists && !force {
+				return fmt.Errorf("view %q already exists (use --force to replace it)", args[1])
+			}
+			return store.SaveView(args[1], args[3])
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("saved view %s\n", args[1])
@@ -288,8 +373,9 @@ func cmdView(args []string) error {
 			fmt.Printf("%s\t%s\n", name, store.Views[name])
 		}
 	case "show":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: angl view show <name>")
+		asJSON := len(args) == 3 && args[2] == "--json"
+		if len(args) != 2 && !asJSON {
+			return fmt.Errorf("usage: angl view show <name> [--json]")
 		}
 		store, err := catalog.Load(path)
 		if err != nil {
@@ -299,7 +385,12 @@ func cmdView(args []string) error {
 		if !ok {
 			return fmt.Errorf("unknown view %q", args[1])
 		}
-		fmt.Println(selector)
+		if asJSON {
+			data, _ := json.MarshalIndent(map[string]string{"name": args[1], "selector": selector}, "", "  ")
+			fmt.Println(string(data))
+		} else {
+			fmt.Println(selector)
+		}
 	default:
 		return fmt.Errorf("unknown view command %q", args[0])
 	}

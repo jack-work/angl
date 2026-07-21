@@ -2,6 +2,7 @@ package logstream
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -17,13 +18,15 @@ type pollResponse struct {
 }
 
 type sourceState struct {
-	source  Source
-	opts    Options
-	file    *os.File
-	offset  int64
-	info    os.FileInfo
-	parser  lineParser
-	lastErr string
+	source       Source
+	opts         Options
+	file         *os.File
+	offset       int64
+	info         os.FileInfo
+	parser       lineParser
+	lastErr      string
+	stableEOF    int
+	prefixSample []byte
 }
 
 func runSource(ctx context.Context, index int, source Source, opts Options, requests <-chan pollRequest, responses chan<- pollResponse) {
@@ -78,6 +81,20 @@ func (s *sourceState) poll(initial bool) ([]Line, error) {
 		return nil, sourceErr(s.source, "stat open file", err)
 	}
 
+	if os.SameFile(currentInfo, pathInfo) && pathInfo.Size() >= s.offset && s.offset > 0 {
+		changed, err := s.prefixChanged()
+		if err != nil {
+			return nil, sourceErr(s.source, "check truncation", err)
+		}
+		if changed {
+			s.offset = 0
+			s.parser.reset()
+			if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+				return nil, sourceErr(s.source, "seek after rewrite", err)
+			}
+		}
+	}
+
 	if !os.SameFile(currentInfo, pathInfo) {
 		// Drain bytes already present in the renamed file before switching.
 		lines, err := s.readAvailable(s.opts.MaxReadBytesPerPoll, s.opts.MaxLinesPerPoll)
@@ -85,8 +102,16 @@ func (s *sourceState) poll(initial bool) ([]Line, error) {
 			return lines, err
 		}
 		if len(lines) == s.opts.MaxLinesPerPoll || currentInfo.Size() > s.offset {
+			s.stableEOF = 0
 			return lines, nil
 		}
+		// Require two consecutive polls at EOF before closing the old handle;
+		// this gives a concurrent writer one full poll interval to append.
+		s.stableEOF++
+		if s.stableEOF < 2 {
+			return lines, nil
+		}
+		s.stableEOF = 0
 		if line, ok := s.parser.flush(s.source); ok {
 			lines = append(lines, line)
 		}
@@ -118,7 +143,13 @@ func (s *sourceState) open(initial bool) ([]Line, error) {
 		return nil, sourceErr(s.source, "stat", err)
 	}
 	s.file, s.info = file, info
+	s.stableEOF = 0
 	s.parser.reset()
+	if err := s.capturePrefix(); err != nil {
+		_ = file.Close()
+		s.file = nil
+		return nil, sourceErr(s.source, "read prefix", err)
+	}
 
 	if initial && s.opts.TailLines > 0 {
 		lines, err := snapshotFile(file, info.Size(), s.source, s.opts.TailLines, s.opts)
@@ -147,6 +178,34 @@ func (s *sourceState) open(initial bool) ([]Line, error) {
 		return nil, nil
 	}
 	return s.readAvailable(s.opts.MaxReadBytesPerPoll, s.opts.MaxLinesPerPoll)
+}
+
+func (s *sourceState) capturePrefix() error {
+	const sampleSize = 64
+	s.prefixSample = s.prefixSample[:0]
+	if s.info.Size() == 0 {
+		return nil
+	}
+	length := min(int64(sampleSize), s.info.Size())
+	buffer := make([]byte, length)
+	n, err := s.file.ReadAt(buffer, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	s.prefixSample = append(s.prefixSample, buffer[:n]...)
+	return nil
+}
+
+func (s *sourceState) prefixChanged() (bool, error) {
+	if len(s.prefixSample) == 0 {
+		return false, nil
+	}
+	buffer := make([]byte, len(s.prefixSample))
+	n, err := s.file.ReadAt(buffer, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return n != len(s.prefixSample) || !bytes.Equal(buffer[:n], s.prefixSample), nil
 }
 
 func (s *sourceState) readAvailable(byteLimit, lineLimit int) ([]Line, error) {

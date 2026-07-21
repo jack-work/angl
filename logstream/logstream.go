@@ -55,13 +55,16 @@ type Options struct {
 }
 
 // Line is one line read from a source. Text excludes the newline and a CR in
-// a CRLF terminator. Sequence is globally monotonic within one Stream.
+// a CRLF terminator. Terminated records whether a newline was present, allowing
+// raw consumers to distinguish a final partial record. Sequence is globally
+// monotonic within one Stream.
 type Line struct {
-	Source    string
-	Path      string
-	Text      string
-	Sequence  uint64
-	Truncated bool
+	Source     string
+	Path       string
+	Text       string
+	Sequence   uint64
+	Truncated  bool
+	Terminated bool
 }
 
 // Event carries either a Line or a non-fatal source error. When Err is not
@@ -179,6 +182,9 @@ func (t *Tailer) run(ctx context.Context, out chan<- Event, ready chan<- struct{
 			select {
 			case request <- pollRequest{initial: initial}:
 			case <-ctx.Done():
+				if initialized != nil {
+					close(initialized)
+				}
 				return false
 			}
 		}

@@ -33,6 +33,37 @@ func decodeRecords(t *testing.T, data []byte) []Record {
 	return records
 }
 
+func TestEncodeRecordPreservesPerRecordContext(t *testing.T) {
+	var out bytes.Buffer
+	err := EncodeRecord(&out, []byte("hello"), RecordContext{
+		Angl: "api", Stream: Combined, Sequence: 42, Path: `C:\\logs\\api.log`, Truncated: true,
+		ResourceAttributes: map[string]any{"service.name": "api", "service.namespace": "angl"},
+	}, Options{Clock: fixedClock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := decodeRecords(t, out.Bytes())
+	if len(records) != 1 {
+		t.Fatalf("records = %d", len(records))
+	}
+	record := records[0]
+	if record.Attributes["stream"] != "combined" || record.Attributes["angl.name"] != "api" ||
+		record.Attributes["angl.log.sequence"] != float64(42) || record.Attributes["log.file.path"] != `C:\\logs\\api.log` ||
+		record.Attributes["angl.log.truncated"] != true {
+		t.Fatalf("attributes = %#v", record.Attributes)
+	}
+}
+
+func TestDefaultStreamIsCombined(t *testing.T) {
+	var out bytes.Buffer
+	if err := EncodeRecord(&out, []byte("hello"), RecordContext{}, Options{Clock: fixedClock}); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeRecords(t, out.Bytes())[0].Attributes["stream"]; got != "combined" {
+		t.Fatalf("stream = %v", got)
+	}
+}
+
 func TestAdapterPartialLinesCRLFAndFlush(t *testing.T) {
 	var out bytes.Buffer
 	adapter := NewAdapter(&out, Options{

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -24,18 +25,12 @@ const SchemaVersion = 1
 var processLock sync.Mutex
 
 // Store is the on-disk metadata catalog. Labels are keyed first by angl name.
-// Views contain saved selector strings and are evaluated when Materialize is
-// called, so they cannot become stale.
+// Views contain saved selector strings and are evaluated against a caller's
+// complete live inventory, so they cannot become stale.
 type Store struct {
 	Version int                          `json:"version"`
 	Labels  map[string]map[string]string `json:"labels,omitempty"`
 	Views   map[string]string            `json:"views,omitempty"`
-}
-
-// Match identifies a catalog entry selected by Query or Materialize.
-type Match struct {
-	Name   string            `json:"name"`
-	Labels map[string]string `json:"labels,omitempty"`
 }
 
 var (
@@ -191,6 +186,36 @@ func (s *Store) Delete(name string) error {
 	return nil
 }
 
+// SelectorItem joins live process fields with independently stored labels.
+// Reserved fields (name, state, enabled, kind) override labels of the same
+// name, so selectors cannot mistake stale metadata for daemon truth.
+type SelectorItem struct {
+	Name    string            `json:"name"`
+	State   string            `json:"state"`
+	Enabled bool              `json:"enabled"`
+	Kind    string            `json:"kind"`
+	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// Resolve evaluates a selector against the complete live inventory, including
+// unlabelled angls, and returns deterministic name order.
+func Resolve(selector Selector, items []SelectorItem) []SelectorItem {
+	matched := make([]SelectorItem, 0, len(items))
+	for _, item := range items {
+		fields := cloneLabels(item.Labels)
+		fields["name"] = item.Name
+		fields["state"] = item.State
+		fields["enabled"] = strconv.FormatBool(item.Enabled)
+		fields["kind"] = item.Kind
+		if selector.Matches(fields) {
+			item.Labels = cloneLabels(item.Labels)
+			matched = append(matched, item)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].Name < matched[j].Name })
+	return matched
+}
+
 func (s *Store) SaveView(name, selector string) error {
 	if err := ValidateName(name); err != nil {
 		return err
@@ -212,37 +237,16 @@ func (s *Store) DeleteView(name string) error {
 	return nil
 }
 
-func (s Store) Query(selector string) ([]Match, error) {
-	parsed, err := ParseSelector(selector)
-	if err != nil {
-		return nil, err
-	}
-	return s.query(parsed), nil
-}
-
-func (s Store) Materialize(view string) ([]Match, error) {
+func (s Store) ResolveView(view string, items []SelectorItem) ([]SelectorItem, error) {
 	selector, ok := s.Views[view]
 	if !ok {
 		return nil, fmt.Errorf("unknown view %q", view)
 	}
-	return s.Query(selector)
-}
-
-func (s Store) query(selector Selector) []Match {
-	names := make([]string, 0, len(s.Labels))
-	for name := range s.Labels {
-		names = append(names, name)
+	parsed, err := ParseSelector(selector)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(names)
-
-	matches := make([]Match, 0)
-	for _, name := range names {
-		labels := s.Labels[name]
-		if selector.Matches(labels) {
-			matches = append(matches, Match{Name: name, Labels: cloneLabels(labels)})
-		}
-	}
-	return matches
+	return Resolve(parsed, items), nil
 }
 
 func (s *Store) ensureMaps() {

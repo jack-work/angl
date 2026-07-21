@@ -34,7 +34,7 @@ func ParseLogArgs(args []string) (LogOptions, []string, error) {
 			opts.Follow = false
 		case "--no-color":
 			opts.NoColor = true
-		case "-n", "--lines":
+		case "-n", "--tail":
 			value, err := take(arg)
 			if err != nil {
 				return opts, nil, err
@@ -44,7 +44,7 @@ func ParseLogArgs(args []string) (LogOptions, []string, error) {
 				return opts, nil, fmt.Errorf("invalid line count %q", value)
 			}
 			opts.Lines = n
-		case "--format", "-o":
+		case "-o", "--output":
 			value, err := take(arg)
 			if err != nil {
 				return opts, nil, err
@@ -60,7 +60,11 @@ func ParseLogArgs(args []string) (LogOptions, []string, error) {
 			if err != nil {
 				return opts, nil, err
 			}
-			opts.Selector = value
+			if opts.Selector == "" {
+				opts.Selector = value
+			} else {
+				opts.Selector += "," + value
+			}
 		case "--view":
 			value, err := take(arg)
 			if err != nil {
@@ -73,9 +77,6 @@ func ParseLogArgs(args []string) (LogOptions, []string, error) {
 			}
 			names = append(names, arg)
 		}
-	}
-	if len(names) == 0 && opts.Selector == "" && opts.View == "" {
-		return opts, nil, fmt.Errorf("provide an angl name, --selector, or --view")
 	}
 	return opts, names, nil
 }

@@ -110,38 +110,55 @@ func TestParseSelectorRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestQueryAndMaterializedViewAreSortedAndFresh(t *testing.T) {
+func TestResolveViewIsSortedAndFresh(t *testing.T) {
 	store := New()
-	for name, labels := range map[string]map[string]string{
-		"zeta":  {"env": "prod", "tier": "backend"},
-		"alpha": {"env": "dev", "tier": "backend"},
-		"beta":  {"env": "dev", "tier": "frontend"},
-	} {
-		if err := store.Annotate(name, labels); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if err := store.SaveView("backends", "tier=backend"); err != nil {
 		t.Fatal(err)
 	}
+	items := []SelectorItem{
+		{Name: "zeta", State: "running", Enabled: true, Kind: "persistent", Labels: map[string]string{"env": "prod", "tier": "backend"}},
+		{Name: "alpha", State: "running", Enabled: true, Kind: "persistent", Labels: map[string]string{"env": "dev", "tier": "backend"}},
+		{Name: "beta", State: "running", Enabled: true, Kind: "persistent", Labels: map[string]string{"env": "dev", "tier": "frontend"}},
+	}
 
-	got, err := store.Materialize("backends")
+	got, err := store.ResolveView("backends", items)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := matchNames(got); !reflect.DeepEqual(names, []string{"alpha", "zeta"}) {
-		t.Fatalf("first materialization = %v", names)
+	if names := selectorItemNames(got); !reflect.DeepEqual(names, []string{"alpha", "zeta"}) {
+		t.Fatalf("first resolution = %v", names)
 	}
 
-	if err := store.Annotate("beta", map[string]string{"tier": "backend"}); err != nil {
-		t.Fatal(err)
-	}
-	got, err = store.Materialize("backends")
+	items[2].Labels["tier"] = "backend"
+	got, err = store.ResolveView("backends", items)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := matchNames(got); !reflect.DeepEqual(names, []string{"alpha", "beta", "zeta"}) {
-		t.Fatalf("fresh materialization = %v", names)
+	if names := selectorItemNames(got); !reflect.DeepEqual(names, []string{"alpha", "beta", "zeta"}) {
+		t.Fatalf("fresh resolution = %v", names)
+	}
+}
+
+func TestResolveUsesLiveInventoryFieldsAndIncludesUnlabelled(t *testing.T) {
+	items := []SelectorItem{
+		{Name: "worker", State: "stopped", Enabled: false, Kind: "persistent"},
+		{Name: "api", State: "running", Enabled: true, Kind: "heartbeat", Labels: map[string]string{"stack": "apps"}},
+		{Name: "stale", State: "running", Enabled: true, Kind: "persistent", Labels: map[string]string{"state": "stopped"}},
+	}
+	selector, err := ParseSelector("state=running,enabled=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Resolve(selector, items)
+	if names := selectorItemNames(got); !reflect.DeepEqual(names, []string{"api", "stale"}) {
+		t.Fatalf("resolved names = %v", names)
+	}
+	if got[0].Labels == nil || items[1].Labels == nil {
+		t.Fatal("labels unexpectedly nil")
+	}
+	got[0].Labels["stack"] = "changed"
+	if items[1].Labels["stack"] != "apps" {
+		t.Fatal("Resolve aliased input labels")
 	}
 }
 
@@ -213,10 +230,10 @@ func TestUpdateSerializesConcurrentWriters(t *testing.T) {
 	}
 }
 
-func matchNames(matches []Match) []string {
-	names := make([]string, len(matches))
-	for i, match := range matches {
-		names[i] = match.Name
+func selectorItemNames(items []SelectorItem) []string {
+	names := make([]string, len(items))
+	for i, item := range items {
+		names[i] = item.Name
 	}
 	return names
 }

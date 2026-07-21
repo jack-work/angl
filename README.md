@@ -79,7 +79,7 @@ Create `$HOME\.config\angl\config.json`:
 .\angl.exe uninstall
 ```
 
-`angl ls` shows a compact, ellipsis-truncated command column for scanning. `angl ls --json` preserves the exact `command` and `args` fields and also includes a complete, Windows-quoted `command_line` string for each process.
+`angl ls` sizes itself to the current terminal. On narrower terminals it snips cells and progressively omits secondary columns rather than wrapping beyond the viewport; `angl ls --json` preserves exact `command` and `args` fields plus a complete, Windows-quoted `command_line` string for every process.
 
 Logs live under `$HOME\.config\angl\logs`. Each process log rotates to `.prev` at 10 MiB.
 
@@ -99,7 +99,7 @@ angl logs orchard-ask-user -o jsonl -n 200 |
 angl logs dracarys-runtime dracarys-loop -f -o jsonl |
   jq -r '[.time, .attributes["angl.name"], .severityText, .body] | @tsv'
 
-# Raw child text for grep, sed, or awk
+# Raw child records for grep, sed, or awk. A final partial record remains partial.
 angl logs orchard-ask-user -o raw | Select-String "error"
 ```
 
@@ -115,14 +115,16 @@ angl ls -l "stack=dracarys"
 angl logs -l "stack=dracarys" -f
 ```
 
-Selectors are comma-separated AND expressions: `key=value`, `key!=value`, `key`, and `!key`.
+Selectors are comma-separated AND expressions: `key=value`, `key!=value`, `key`, and `!key`. They match both metadata and live process fields: `name`, `state`, `enabled`, and `kind` (`persistent` or `heartbeat`). With no names, `angl logs` selects all angls; explicit names, repeated selectors, and a saved view are intersected.
 
-Saved views are virtual/materialized at query time: they store a selector, then reevaluate it against current metadata whenever used.
+Saved views are virtual and resolved against current process status and metadata whenever used. Saving an existing name fails unless `--force` is supplied.
 
 ```powershell
 angl view save dracarys --selector "stack=dracarys"
 angl view list
+angl view show dracarys --json
 angl logs --view dracarys -f
+angl view save dracarys --selector "stack=dracarys,state=running" --force
 angl view delete dracarys
 ```
 

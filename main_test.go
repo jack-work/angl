@@ -4,11 +4,13 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jack-work/angl/catalog"
 	"github.com/jack-work/angl/daemon"
+	"github.com/jedib0t/go-pretty/v6/text"
 )
 
 func TestFormatCommand(t *testing.T) {
@@ -103,8 +105,48 @@ func TestFormatLabels(t *testing.T) {
 	}
 }
 
+func TestRenderListTableFitsTerminalWidth(t *testing.T) {
+	statuses := []daemon.ProcessStatus{
+		{Name: "a-very-long-process-name", State: daemon.StateRunning, PID: 12345, Uptime: "12m3s", Command: `C:\\Program Files\\tool.exe`, Args: []string{"--message", strings.Repeat("long ", 30)}, Charge: strings.Repeat("charge ", 20)},
+	}
+	store := catalog.New()
+	store.Labels[statuses[0].Name] = map[string]string{"stack": "dracarys", "role": "runtime"}
+	for _, width := range []int{32, 40, 47, 48, 60, 71, 72, 80, 99, 100, 120, 129, 130, 160, 169, 170, 200} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			got := renderListTable(statuses, store, width)
+			for lineNumber, line := range strings.Split(got, "\n") {
+				if gotWidth := text.StringWidthWithoutEscSequences(line); gotWidth > width {
+					t.Fatalf("line %d width = %d, want <= %d:\n%s", lineNumber+1, gotWidth, width, got)
+				}
+			}
+		})
+	}
+}
+
+func TestStatusMatchesCoreFieldsAndMetadata(t *testing.T) {
+	status := daemon.ProcessStatus{Name: "api", State: daemon.StateRunning, Enabled: true, Interval: "1h"}
+	for selectorText, want := range map[string]bool{
+		"name=api,state=running,enabled=true,kind=heartbeat,stack=apps": true,
+		"state=stopped":   false,
+		"enabled=false":   false,
+		"kind=persistent": false,
+	} {
+		selector, err := catalog.ParseSelector(selectorText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := statusMatches(selector, status, map[string]string{"stack": "apps"}); got != want {
+			t.Errorf("%q = %v, want %v", selectorText, got, want)
+		}
+	}
+}
+
 func TestResolveObservationNames(t *testing.T) {
-	statuses := []daemon.ProcessStatus{{Name: "runtime"}, {Name: "loop"}, {Name: "other"}}
+	statuses := []daemon.ProcessStatus{
+		{Name: "runtime", State: daemon.StateRunning, Enabled: true},
+		{Name: "loop", State: daemon.StateStopped, Enabled: false},
+		{Name: "other", State: daemon.StateRunning, Enabled: true},
+	}
 	store := catalog.New()
 	if err := store.Annotate("runtime", map[string]string{"stack": "dracarys"}); err != nil {
 		t.Fatal(err)
@@ -115,12 +157,28 @@ func TestResolveObservationNames(t *testing.T) {
 	if err := store.SaveView("dracarys", "stack=dracarys"); err != nil {
 		t.Fatal(err)
 	}
-	names, err := resolveObservationNames([]string{"other"}, "", "dracarys", statuses, store)
+	names, err := resolveObservationNames(nil, "", "dracarys", statuses, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, ","), "loop,runtime"; got != want {
+		t.Fatalf("view names = %q, want %q", got, want)
+	}
+
+	names, err = resolveObservationNames([]string{"other", "runtime"}, "state=running", "dracarys", statuses, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, ","), "runtime"; got != want {
+		t.Fatalf("intersection names = %q, want %q", got, want)
+	}
+
+	names, err = resolveObservationNames(nil, "", "", statuses, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(names, ","), "loop,other,runtime"; got != want {
-		t.Fatalf("names = %q, want %q", got, want)
+		t.Fatalf("all names = %q, want %q", got, want)
 	}
 }
 

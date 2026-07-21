@@ -39,6 +39,27 @@ func TestReadLastUsesReverseSuffix(t *testing.T) {
 	}
 }
 
+func TestStreamReturnsBeforeLargeInitialTailIsDrained(t *testing.T) {
+	var content strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintln(&content, i)
+	}
+	path := writeFile(t, t.TempDir(), "startup.log", content.String())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tailer := mustTailer(t, []Source{{Path: path}}, Options{TailLines: 5000, EventBuffer: 1, MaxLinesPerPoll: 5000})
+	returned := make(chan (<-chan Event), 1)
+	go func() { returned <- tailer.Stream(ctx) }()
+	select {
+	case events := <-returned:
+		if got := receiveLines(t, events, 1)[0].Text; got != "0" {
+			t.Fatalf("first line = %q", got)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Stream blocked on initial event delivery")
+	}
+}
+
 func TestReadLastMultipleSourcesStableOrderAndTags(t *testing.T) {
 	dir := t.TempDir()
 	first := writeFile(t, dir, "first.log", "a\nb\nc\n")
@@ -70,6 +91,9 @@ func TestReadLastIncludesFinalPartialAndClipsLongLines(t *testing.T) {
 	}
 	if lines[0].Truncated || !lines[1].Truncated {
 		t.Fatalf("truncation flags = %v, %v", lines[0].Truncated, lines[1].Truncated)
+	}
+	if !lines[0].Terminated || lines[1].Terminated {
+		t.Fatalf("terminators = %v, %v", lines[0].Terminated, lines[1].Terminated)
 	}
 	if lines[0].Source != "long.log" {
 		t.Fatalf("default source = %q", lines[0].Source)
@@ -153,6 +177,21 @@ func TestStreamDetectsTruncation(t *testing.T) {
 	if got := receiveLines(t, events, 1)[0].Text; got != "new" {
 		t.Fatalf("after truncation = %q", got)
 	}
+}
+
+func TestStreamDetectsTruncateAndRegrowPastOffset(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "regrow.log", "old-one\nold-two\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := mustTailer(t, []Source{{Path: path}}, Options{TailLines: 1, PollInterval: 10 * time.Millisecond}).Stream(ctx)
+	_ = receiveLines(t, events, 1)
+	// Rewrite with a distinct prefix and grow beyond the previous offset before
+	// the next poll. Size-only truncation detection would skip this content.
+	if err := os.WriteFile(path, []byte("new-one\nnew-two\nnew-three\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lines := receiveLines(t, events, 3)
+	assertLines(t, lines, []string{"regrow.log:new-one", "regrow.log:new-two", "regrow.log:new-three"})
 }
 
 func TestStreamDetectsRotationAndDrainsRenamedFile(t *testing.T) {
@@ -259,6 +298,18 @@ func TestReadLastDoesNotModifyFile(t *testing.T) {
 	}
 	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		t.Fatalf("file metadata changed: before=%v/%v after=%v/%v", before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+}
+
+func TestParserTracksNewlineTermination(t *testing.T) {
+	parser := newLineParser(32)
+	_, lines := parser.consume([]byte("one\ntwo"), 10, Source{Name: "x"})
+	if len(lines) != 1 || !lines[0].Terminated {
+		t.Fatalf("terminated line = %#v", lines)
+	}
+	partial, ok := parser.flush(Source{Name: "x"})
+	if !ok || partial.Terminated || partial.Text != "two" {
+		t.Fatalf("partial line = %#v, %v", partial, ok)
 	}
 }
 

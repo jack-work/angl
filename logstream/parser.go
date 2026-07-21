@@ -25,7 +25,9 @@ func (p *lineParser) consume(data []byte, lineLimit int, source Source) (int, []
 	for index, value := range data {
 		p.active = true
 		if value == '\n' {
-			lines = append(lines, p.line(source))
+			line := p.line(source)
+			line.Terminated = true
+			lines = append(lines, line)
 			p.reset()
 			if len(lines) == lineLimit {
 				return index + 1, lines

@@ -18,8 +18,8 @@ import (
 	"github.com/Microsoft/go-winio"
 	"github.com/jack-work/angl/catalog"
 	"github.com/jack-work/angl/daemon"
-	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
+	"golang.org/x/term"
 )
 
 const version = "0.8.0"
@@ -76,8 +76,8 @@ func main() {
 		err = cmdTailArgs(os.Args[2:])
 	case "logs":
 		err = cmdLogs(os.Args[2:])
-	case "annotate", "metadata", "label":
-		err = cmdAnnotate(os.Args[2:])
+	case "label":
+		err = cmdLabel(os.Args[2:])
 	case "query":
 		err = cmdQuery(os.Args[2:])
 	case "view":
@@ -221,7 +221,7 @@ func cmdList(asJSON bool, selector string) error {
 		}
 		filtered := statuses[:0]
 		for _, status := range statuses {
-			if parsed.Matches(store.Labels[status.Name]) {
+			if statusMatches(parsed, status, store.Labels[status.Name]) {
 				filtered = append(filtered, status)
 			}
 		}
@@ -243,54 +243,8 @@ func cmdList(asJSON bool, selector string) error {
 		return nil
 	}
 
-	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.SetStyle(table.StyleRounded)
-	t.AppendHeader(table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS", "COMMAND", "CHARGE", "METADATA"})
-	for _, status := range statuses {
-		pid := "-"
-		if status.PID > 0 {
-			pid = strconv.Itoa(status.PID)
-		}
-		uptime := status.Uptime
-		if uptime == "" {
-			uptime = status.Lifetime
-		}
-		if uptime == "" {
-			uptime = "-"
-		}
-		restarts := strconv.Itoa(status.Restarts)
-		if status.MaxRestarts > 0 {
-			restarts = fmt.Sprintf("%d/%d", status.Restarts, status.MaxRestarts)
-		}
-		state := string(status.State)
-		switch status.State {
-		case daemon.StateRunning:
-			state = text.FgGreen.Sprint(state)
-		case daemon.StateFailed:
-			state = text.FgRed.Sprint(state)
-		case daemon.StateBackoff:
-			state = text.FgYellow.Sprint(state)
-		case daemon.StateDisabled:
-			state = text.Faint.Sprint(state)
-		}
-		t.AppendRow(table.Row{
-			sanitizeCell(status.Name, 30), state, pid, uptime, restarts,
-			sanitizeCell(formatCommand(status.Command, status.Args), 0),
-			sanitizeCell(status.Charge, 60), formatLabels(store.Labels[status.Name]),
-		})
-	}
-	t.SetColumnConfigs([]table.ColumnConfig{
-		{Number: 1, WidthMax: 30},
-		{Number: 2, WidthMax: 10},
-		{Number: 3, Align: text.AlignRight},
-		{Number: 4, Align: text.AlignRight},
-		{Number: 5, Align: text.AlignRight},
-		{Number: 6, WidthMax: 48, WidthMaxEnforcer: snipTableCell},
-		{Number: 7, WidthMax: 42, WidthMaxEnforcer: text.WrapSoft},
-		{Number: 8, WidthMax: 36, WidthMaxEnforcer: text.WrapSoft},
-	})
-	t.Render()
+	width := terminalWidth()
+	fmt.Fprintln(os.Stdout, renderListTable(statuses, store, width))
 	return nil
 }
 
@@ -333,6 +287,33 @@ func quoteCommandPart(part string) string {
 
 func snipTableCell(s string, max int) string {
 	return text.Snip(s, max, "...")
+}
+
+func terminalWidth() int {
+	if columns, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && columns > 0 {
+		return columns
+	}
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+		return width
+	}
+	return 0
+}
+
+func statusSelectorLabels(status daemon.ProcessStatus, labels map[string]string) map[string]string {
+	fields := cloneLabels(labels)
+	fields["name"] = status.Name
+	fields["state"] = string(status.State)
+	fields["enabled"] = strconv.FormatBool(status.Enabled)
+	if status.Interval == "" {
+		fields["kind"] = "persistent"
+	} else {
+		fields["kind"] = "heartbeat"
+	}
+	return fields
+}
+
+func statusMatches(selector catalog.Selector, status daemon.ProcessStatus, labels map[string]string) bool {
+	return selector.Matches(statusSelectorLabels(status, labels))
 }
 
 func sanitizeCell(s string, max int) string {
@@ -653,18 +634,20 @@ Transient:
     --charge <desc>         Description
 
 Observation:
-  logs <name...> [flags]    Read or follow one or more logs
-    -n, --lines <n>         History per angl (default 100)
+  logs [name...] [flags]    Read or follow logs (no names selects all)
+    -n, --tail <n>          History per angl (default 100)
     -f, --follow            Continue following
-    -o, --format <format>   pretty (default), jsonl, or raw
-    -l, --selector <expr>   Select angls by metadata
-    --view <name>           Use a saved selector view
+    -o, --output <format>   pretty (default), jsonl, or raw
+    -l, --selector <expr>   Select by name/state/enabled/kind or metadata; repeat to AND
+    --view <name>           Intersect with a saved selector view
     --no-color              Disable pretty severity color
   tail <name> [flags]       Alias for logs <name> --follow
-  annotate <name> --set key=value [--unset key]
+  label set <name> key=value [key=value...]
+  label unset <name> key [key...]
+  label list <name>
   query [-l <selector>] [--json]
-  view save <name> --selector <expr>
-  view list | view show <name> | view delete <name>
+  view save <name> --selector <expr> [--force]
+  view list | view show <name> [--json] | view delete <name>
 
 Startup:
   install                   Register logon task (Task Scheduler) + start daemon

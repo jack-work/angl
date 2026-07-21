@@ -22,8 +22,9 @@ import (
 type Stream string
 
 const (
-	Stdout Stream = "stdout"
-	Stderr Stream = "stderr"
+	Stdout   Stream = "stdout"
+	Stderr   Stream = "stderr"
+	Combined Stream = "combined"
 )
 
 // OpenTelemetry severity numbers are ranges; these constants use the first
@@ -48,6 +49,45 @@ type Metadata struct {
 	PID                int
 	Attributes         map[string]any
 	ResourceAttributes map[string]any
+}
+
+type RecordContext struct {
+	Angl               string
+	Stream             Stream
+	Charge             string
+	Command            string
+	PID                int
+	Sequence           uint64
+	Path               string
+	Truncated          bool
+	Attributes         map[string]any
+	ResourceAttributes map[string]any
+}
+
+// EncodeRecord converts one already-framed log record without constructing a
+// per-line Adapter. It preserves tailer context such as path, sequence, and
+// clipping in the canonical attributes.
+func EncodeRecord(out io.Writer, body []byte, context RecordContext, opts Options) error {
+	opts.Metadata = Metadata{
+		Angl: context.Angl, Stream: context.Stream, Charge: context.Charge,
+		Command: context.Command, PID: context.PID,
+		Attributes:         cloneAttributes(context.Attributes),
+		ResourceAttributes: cloneAttributes(context.ResourceAttributes),
+	}
+	if opts.Metadata.Attributes == nil {
+		opts.Metadata.Attributes = make(map[string]any)
+	}
+	if context.Sequence != 0 {
+		opts.Metadata.Attributes["angl.log.sequence"] = context.Sequence
+	}
+	if context.Path != "" {
+		opts.Metadata.Attributes["log.file.path"] = context.Path
+	}
+	if context.Truncated {
+		opts.Metadata.Attributes["angl.log.truncated"] = true
+	}
+	adapter := NewAdapter(out, opts)
+	return adapter.emit(body)
 }
 
 // Resource contains OTEL resource attributes shared by the emitting service.
@@ -105,7 +145,7 @@ func NewAdapter(out io.Writer, opts Options) *Adapter {
 		opts.Clock = time.Now
 	}
 	if opts.Metadata.Stream == "" {
-		opts.Metadata.Stream = Stdout
+		opts.Metadata.Stream = Combined
 	}
 	return &Adapter{out: out, opts: opts}
 }
