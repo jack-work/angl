@@ -62,11 +62,11 @@ func TestAdapterPartialLinesCRLFAndFlush(t *testing.T) {
 		if record.Body != wantBodies[i] || record.SeverityNumber != wantSeverities[i] {
 			t.Errorf("record[%d] = body %q severity %d", i, record.Body, record.SeverityNumber)
 		}
-		if record.Time != "2026-07-21T01:15:30.123456789Z" || record.TimeUnixNano != "1784596530123456789" {
-			t.Errorf("unexpected deterministic time: %#v", record)
+		if record.Time != "" || record.TimeUnixNano != "" {
+			t.Errorf("plain logs should not fabricate event time: %#v", record)
 		}
-		if record.ObservedTimeUnixNano != record.TimeUnixNano {
-			t.Errorf("observed time = %q, event time = %q", record.ObservedTimeUnixNano, record.TimeUnixNano)
+		if record.ObservedTimeUnixNano != "1784596530123456789" {
+			t.Errorf("observed time = %q", record.ObservedTimeUnixNano)
 		}
 		if record.Attributes["angl.name"] != "api" || record.Attributes["stream"] != "stdout" {
 			t.Errorf("missing angl metadata: %#v", record.Attributes)

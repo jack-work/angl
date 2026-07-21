@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,12 @@ func Render(record Record, opts RenderOptions) string {
 	if layout == "" {
 		layout = "15:04:05.000"
 	}
-	timestamp := record.Time
+	timestamp := "-"
+	if record.Time != "" {
+		timestamp = record.Time
+	} else if nanos, err := strconv.ParseInt(record.ObservedTimeUnixNano, 10, 64); err == nil {
+		timestamp = time.Unix(0, nanos).UTC().Format(time.RFC3339Nano)
+	}
 	if t, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
 		if opts.Location != nil {
 			t = t.In(opts.Location)

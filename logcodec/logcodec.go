@@ -60,8 +60,8 @@ type Resource struct {
 // for uint64 and avoiding precision loss in JavaScript consumers. Time is an
 // RFC3339 convenience field for jq, sed, awk, and humans.
 type Record struct {
-	TimeUnixNano         string         `json:"timeUnixNano"`
-	Time                 string         `json:"time"`
+	TimeUnixNano         string         `json:"timeUnixNano,omitempty"`
+	Time                 string         `json:"time,omitempty"`
 	ObservedTimeUnixNano string         `json:"observedTimeUnixNano"`
 	SeverityText         string         `json:"severityText"`
 	SeverityNumber       int            `json:"severityNumber"`
@@ -203,7 +203,7 @@ func (a *Adapter) emit(raw []byte) error {
 			severity = SeverityError
 		}
 	}
-	eventTime := now
+	var eventTime time.Time
 	var source map[string]any
 	jsonLevel := false
 
@@ -254,14 +254,16 @@ func (a *Adapter) emit(raw []byte) error {
 	}
 
 	record := Record{
-		TimeUnixNano:         strconv.FormatInt(eventTime.UnixNano(), 10),
-		Time:                 eventTime.Format(time.RFC3339Nano),
 		ObservedTimeUnixNano: strconv.FormatInt(now.UnixNano(), 10),
 		SeverityText:         SeverityName(severity),
 		SeverityNumber:       severity,
 		Body:                 body,
 		Attributes:           attrs,
 		Resource:             Resource{Attributes: resource},
+	}
+	if !eventTime.IsZero() {
+		record.TimeUnixNano = strconv.FormatInt(eventTime.UnixNano(), 10)
+		record.Time = eventTime.Format(time.RFC3339Nano)
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {

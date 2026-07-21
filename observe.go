@@ -76,7 +76,7 @@ func cmdLogs(args []string) error {
 		var encoded strings.Builder
 		adapter := logcodec.NewAdapter(&encoded, logcodec.Options{
 			Metadata: logcodec.Metadata{
-				Angl: line.Source, Stream: logcodec.Stdout, Charge: status.Charge,
+				Angl: line.Source, Stream: logcodec.Stream("combined"), Charge: status.Charge,
 				PID: status.PID, Attributes: metadataAttributes(labels),
 				ResourceAttributes: map[string]any{"service.name": line.Source, "service.namespace": "angl"},
 			},
