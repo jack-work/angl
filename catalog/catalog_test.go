@@ -1,0 +1,222 @@
+//go:build windows
+
+package catalog
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func TestLoadMissingAndLegacyCatalog(t *testing.T) {
+	missing, err := Load(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.Version != SchemaVersion || missing.Labels == nil || missing.Views == nil {
+		t.Fatalf("missing catalog = %#v", missing)
+	}
+
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(path, []byte(`{"labels":{"api":{"tier":"backend"}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Version != SchemaVersion || legacy.Labels["api"]["tier"] != "backend" {
+		t.Fatalf("legacy catalog = %#v", legacy)
+	}
+}
+
+func TestAnnotateMergesAndCopiesLabels(t *testing.T) {
+	store := New()
+	labels := map[string]string{"tier": "backend"}
+	if err := store.Annotate("api", labels); err != nil {
+		t.Fatal(err)
+	}
+	labels["tier"] = "mutated"
+	if err := store.Annotate("api", map[string]string{"owner": "platform"}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"tier": "backend", "owner": "platform"}
+	if !reflect.DeepEqual(store.Labels["api"], want) {
+		t.Fatalf("labels = %#v, want %#v", store.Labels["api"], want)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+	}{
+		{name: "empty key", labels: map[string]string{"": "value"}},
+		{name: "space key", labels: map[string]string{"bad key": "value"}},
+		{name: "comma value", labels: map[string]string{"key": "a,b"}},
+		{name: "space value", labels: map[string]string{"key": " value"}},
+		{name: "control value", labels: map[string]string{"key": "line\nbreak"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateLabels(tt.labels); err == nil {
+				t.Fatal("ValidateLabels unexpectedly succeeded")
+			}
+		})
+	}
+	if err := ValidateLabels(map[string]string{"app.kubernetes.io/name": "api-v2", "empty": ""}); err != nil {
+		t.Fatalf("valid labels rejected: %v", err)
+	}
+}
+
+func TestSelectorMatching(t *testing.T) {
+	labels := map[string]string{"env": "dev", "tier": "backend", "owner": "platform"}
+	tests := []struct {
+		selector string
+		want     bool
+	}{
+		{selector: "", want: true},
+		{selector: "env=dev,tier=backend", want: true},
+		{selector: "env!=prod,owner", want: true},
+		{selector: "missing!=value", want: true},
+		{selector: "!region", want: true},
+		{selector: "env=prod", want: false},
+		{selector: "env!=dev", want: false},
+		{selector: "!owner", want: false},
+		{selector: "region", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.selector, func(t *testing.T) {
+			selector, err := ParseSelector(tt.selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := selector.Matches(labels); got != tt.want {
+				t.Fatalf("Matches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSelectorRejectsInvalidInput(t *testing.T) {
+	for _, selector := range []string{"env=dev,", "=dev", "!", "bad key=value", "!env=value"} {
+		if _, err := ParseSelector(selector); err == nil {
+			t.Errorf("ParseSelector(%q) unexpectedly succeeded", selector)
+		}
+	}
+}
+
+func TestQueryAndMaterializedViewAreSortedAndFresh(t *testing.T) {
+	store := New()
+	for name, labels := range map[string]map[string]string{
+		"zeta":  {"env": "prod", "tier": "backend"},
+		"alpha": {"env": "dev", "tier": "backend"},
+		"beta":  {"env": "dev", "tier": "frontend"},
+	} {
+		if err := store.Annotate(name, labels); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SaveView("backends", "tier=backend"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Materialize("backends")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := matchNames(got); !reflect.DeepEqual(names, []string{"alpha", "zeta"}) {
+		t.Fatalf("first materialization = %v", names)
+	}
+
+	if err := store.Annotate("beta", map[string]string{"tier": "backend"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Materialize("backends")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := matchNames(got); !reflect.DeepEqual(names, []string{"alpha", "beta", "zeta"}) {
+		t.Fatalf("fresh materialization = %v", names)
+	}
+}
+
+func TestSaveProducesDeterministicJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	store := New()
+	store.Labels["zeta"] = map[string]string{"z": "last", "a": "first"}
+	store.Labels["alpha"] = map[string]string{"tier": "backend"}
+	store.Views["prod"] = "env=prod"
+
+	if err := Save(path, store); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, store); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("repeated saves differ")
+	}
+	if strings.Index(string(first), `"alpha"`) > strings.Index(string(first), `"zeta"`) ||
+		strings.Index(string(first), `"a"`) > strings.Index(string(first), `"z"`) {
+		t.Fatalf("map keys not sorted:\n%s", first)
+	}
+	var decoded Store
+	if err := json.Unmarshal(first, &decoded); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+}
+
+func TestUpdateSerializesConcurrentWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	const writers = 12
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			name := "worker-" + string(rune('a'+i))
+			errs <- Update(path, func(store *Store) error {
+				return store.Annotate(name, map[string]string{"group": "test"})
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Labels) != writers {
+		t.Fatalf("got %d entries, want %d", len(store.Labels), writers)
+	}
+}
+
+func matchNames(matches []Match) []string {
+	names := make([]string, len(matches))
+	for i, match := range matches {
+		names[i] = match.Name
+	}
+	return names
+}
