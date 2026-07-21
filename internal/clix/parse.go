@@ -18,7 +18,7 @@ type LogOptions struct {
 }
 
 func ParseLogArgs(args []string) (LogOptions, []string, error) {
-	opts := LogOptions{Format: "pretty", Lines: 100, Follow: true}
+	opts := LogOptions{Format: "pretty", Lines: 100}
 	var names []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -56,7 +56,7 @@ func ParseLogArgs(args []string) (LogOptions, []string, error) {
 				return opts, nil, fmt.Errorf("invalid since duration %q", value)
 			}
 			opts.Since = d
-		case "--format":
+		case "--format", "-o":
 			value, err := take(arg)
 			if err != nil {
 				return opts, nil, err

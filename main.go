@@ -3,25 +3,26 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/Microsoft/go-winio"
+	"github.com/jack-work/angl/catalog"
 	"github.com/jack-work/angl/daemon"
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 )
 
-const version = "0.7.0"
+const version = "0.8.0"
 
 const (
 	detachedProcess = 0x00000008
@@ -40,8 +41,7 @@ func main() {
 	case "daemon":
 		err = cmdDaemon(os.Args[2:])
 	case "list", "ls":
-		jsonFlag := len(os.Args) > 2 && os.Args[2] == "--json"
-		err = cmdList(jsonFlag)
+		err = cmdListArgs(os.Args[2:])
 	case "status":
 		err = withName(os.Args[2:], func(name string) error {
 			return rpcPrint("status", nameP(name))
@@ -75,7 +75,15 @@ func main() {
 			return rpcOKMsg("unregister", nameP(name), "unregistered %s", name)
 		})
 	case "tail":
-		err = withName(os.Args[2:], cmdTail)
+		err = cmdTailArgs(os.Args[2:])
+	case "logs":
+		err = cmdLogs(os.Args[2:])
+	case "annotate":
+		err = cmdAnnotate(os.Args[2:])
+	case "query":
+		err = cmdQuery(os.Args[2:])
+	case "view":
+		err = cmdView(os.Args[2:])
 	case "install":
 		err = cmdInstall()
 	case "uninstall":
@@ -152,7 +160,27 @@ func cmdDaemon(args []string) error {
 
 // --- List ---
 
-func cmdList(asJSON bool) error {
+func cmdListArgs(args []string) error {
+	asJSON := false
+	selector := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			asJSON = true
+		case "-l", "--selector":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a value", args[i])
+			}
+			i++
+			selector = args[i]
+		default:
+			return fmt.Errorf("unknown list flag %q", args[i])
+		}
+	}
+	return cmdList(asJSON, selector)
+}
+
+func cmdList(asJSON bool, selector string) error {
 	result, err := rpcCallRaw("list", nil)
 	if err != nil {
 		return err
@@ -162,18 +190,44 @@ func cmdList(asJSON bool) error {
 	if err := json.Unmarshal(result, &statuses); err != nil {
 		return fmt.Errorf("decode daemon response: %w", err)
 	}
+	store, _ := catalog.Load(catalog.DefaultPath())
+	if selector != "" {
+		parsed, err := catalog.ParseSelector(selector)
+		if err != nil {
+			return err
+		}
+		filtered := statuses[:0]
+		for _, status := range statuses {
+			if parsed.Matches(store.Labels[status.Name]) {
+				filtered = append(filtered, status)
+			}
+		}
+		statuses = filtered
+	}
 	if len(statuses) == 0 {
-		fmt.Println("no angls configured")
+		if asJSON {
+			fmt.Println("[]")
+		}
 		return nil
 	}
 	if asJSON {
-		pretty, _ := json.MarshalIndent(statuses, "", "  ")
+		type listedStatus struct {
+			daemon.ProcessStatus
+			Metadata map[string]string `json:"metadata,omitempty"`
+		}
+		listed := make([]listedStatus, 0, len(statuses))
+		for _, status := range statuses {
+			listed = append(listed, listedStatus{ProcessStatus: status, Metadata: cloneLabels(store.Labels[status.Name])})
+		}
+		pretty, _ := json.MarshalIndent(listed, "", "  ")
 		fmt.Println(string(pretty))
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATE\tPID\tUPTIME\tRESTARTS\tCOMMAND\tCHARGE")
+	t := table.NewWriter()
+	t.SetOutputMirror(os.Stdout)
+	t.SetStyle(table.StyleRounded)
+	t.AppendHeader(table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS", "COMMAND", "CHARGE", "METADATA"})
 	for _, status := range statuses {
 		pid := "-"
 		if status.PID > 0 {
@@ -190,12 +244,51 @@ func cmdList(asJSON bool) error {
 		if status.MaxRestarts > 0 {
 			restarts = fmt.Sprintf("%d/%d", status.Restarts, status.MaxRestarts)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			sanitizeCell(status.Name, 30), status.State, pid, uptime, restarts,
+		state := string(status.State)
+		switch status.State {
+		case daemon.StateRunning:
+			state = text.FgGreen.Sprint(state)
+		case daemon.StateFailed:
+			state = text.FgRed.Sprint(state)
+		case daemon.StateBackoff:
+			state = text.FgYellow.Sprint(state)
+		case daemon.StateDisabled:
+			state = text.Faint.Sprint(state)
+		}
+		t.AppendRow(table.Row{
+			sanitizeCell(status.Name, 30), state, pid, uptime, restarts,
 			sanitizeCell(formatCommand(status.Command, status.Args), 80),
-			sanitizeCell(status.Charge, 60))
+			sanitizeCell(status.Charge, 60), formatLabels(store.Labels[status.Name]),
+		})
 	}
-	return w.Flush()
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Number: 1, WidthMax: 30},
+		{Number: 2, WidthMax: 10},
+		{Number: 3, Align: text.AlignRight},
+		{Number: 4, Align: text.AlignRight},
+		{Number: 5, Align: text.AlignRight},
+		{Number: 6, WidthMax: 48, WidthMaxEnforcer: text.WrapSoft},
+		{Number: 7, WidthMax: 42, WidthMaxEnforcer: text.WrapSoft},
+		{Number: 8, WidthMax: 36, WidthMaxEnforcer: text.WrapSoft},
+	})
+	t.Render()
+	return nil
+}
+
+func formatLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+labels[key])
+	}
+	return sanitizeCell(strings.Join(parts, ","), 80)
 }
 
 func formatCommand(command string, args []string) string {
@@ -224,48 +317,6 @@ func sanitizeCell(s string, max int) string {
 		return s[:max-3] + "..."
 	}
 	return s
-}
-
-// --- Tail ---
-
-func cmdTail(name string) error {
-	if err := daemon.ValidateName(name); err != nil {
-		return err
-	}
-	path := daemon.LogPath(name)
-	file, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open log %s: %w", path, err)
-	}
-	defer file.Close()
-
-	history, err := io.ReadAll(file)
-	if err != nil {
-		return fmt.Errorf("read log: %w", err)
-	}
-	lines := strings.Split(strings.TrimRight(string(history), "\r\n"), "\n")
-	if len(lines) > 100 {
-		lines = lines[len(lines)-100:]
-	}
-	if len(history) > 0 {
-		fmt.Println(strings.Join(lines, "\n"))
-	}
-
-	fmt.Fprintf(os.Stderr, "tailing %s (ctrl+c to stop)\n", path)
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			fmt.Print(line)
-		}
-		if err == nil {
-			continue
-		}
-		if err != io.EOF {
-			return err
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
 }
 
 // --- JSON-RPC client ---
@@ -553,7 +604,7 @@ Daemon:
   daemon [--detach]         Run supervisor (--detach forks to background)
 
 Process control:
-  ls, list [--json]         List all angls with status
+  ls, list [--json] [-l <selector>]   List angls with metadata
   status <name>             Detailed status of an angl
   start <name>              Start an angl
   stop <name>               Stop an angl
@@ -574,7 +625,18 @@ Transient:
     --charge <desc>         Description
 
 Observation:
-  tail <name>               Stream stdout/stderr (ctrl+c to stop)
+  logs <name...> [flags]    Read or follow one or more logs
+    -n, --lines <n>         History per angl (default 100)
+    -f, --follow            Continue following
+    -o, --format <format>   pretty (default), jsonl, or raw
+    -l, --selector <expr>   Select angls by metadata
+    --view <name>           Use a saved selector view
+    --no-color              Disable pretty severity color
+  tail <name> [flags]       Alias for logs <name> --follow
+  annotate <name> --set key=value [--unset key]
+  query [-l <selector>] [--json]
+  view save <name> --selector <expr>
+  view list | view show <name> | view delete <name>
 
 Startup:
   install                   Register logon task (Task Scheduler) + start daemon
@@ -586,6 +648,7 @@ Other:
 
 Config: ~/.config/angl/config.json
 Transient: ~/.config/angl/transient.json
+Catalog: ~/.config/angl/catalog.json
 
 Semantics:
   Persistent process (no interval): runs continuously, restarts on crash

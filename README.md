@@ -79,7 +79,52 @@ Create `$HOME\.config\angl\config.json`:
 .\angl.exe uninstall
 ```
 
-Logs live under `$HOME\.config\angl\logs`. Each process log rotates to `.prev` at 10 MiB. `tail` follows the current file directly; restart `tail` after a rotation.
+Logs live under `$HOME\.config\angl\logs`. Each process log rotates to `.prev` at 10 MiB.
+
+## Observe logs and add metadata
+
+`angl logs` is a read-only observation layer over the existing plain log files. It does not require a daemon restart and never signals the supervised processes.
+
+```powershell
+# Clean terminal snapshot; add -f to follow
+angl logs orchard-ask-user -n 50
+
+# Canonical OpenTelemetry-inspired NDJSON, one record per line
+angl logs orchard-ask-user -o jsonl -n 200 |
+  jq 'select(.severityNumber >= 17) | {time, body, attributes}'
+
+# Follow several angls with source identity in every record
+angl logs dracarys-runtime dracarys-loop -f -o jsonl |
+  jq -r '[.time, .attributes["angl.name"], .severityText, .body] | @tsv'
+
+# Raw child text for grep, sed, or awk
+angl logs orchard-ask-user -o raw | Select-String "error"
+```
+
+The JSONL schema is deliberately record-oriented and friendly to `jq`, `sed`, and `awk`; it follows the OpenTelemetry Logs data model without wrapping each line in an OTLP export batch. Core fields include `timeUnixNano`, `time`, `observedTimeUnixNano`, `severityText`, `severityNumber`, `body`, `attributes`, and `resource`.
+
+Metadata is stored atomically in `catalog.json`, separate from process definitions, so annotation does not reload or restart an angl:
+
+```powershell
+angl annotate dracarys-runtime --set stack=dracarys --set role=runtime
+angl annotate dracarys-loop --set stack=dracarys --set role=loop
+angl query -l "stack=dracarys" --json
+angl ls -l "stack=dracarys"
+angl logs -l "stack=dracarys" -f
+```
+
+Selectors are comma-separated AND expressions: `key=value`, `key!=value`, `key`, and `!key`.
+
+Saved views are virtual/materialized at query time: they store a selector, then reevaluate it against current metadata whenever used.
+
+```powershell
+angl view save dracarys --selector "stack=dracarys"
+angl view list
+angl logs --view dracarys -f
+angl view delete dracarys
+```
+
+Following is rotation- and truncation-aware, bounded in memory, and reads all log files read-only.
 
 ### Temporary registrations
 

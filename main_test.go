@@ -2,7 +2,13 @@
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/jack-work/angl/catalog"
+	"github.com/jack-work/angl/daemon"
+)
 
 func TestFormatCommand(t *testing.T) {
 	tests := []struct {
@@ -36,5 +42,43 @@ func TestFormatCommand(t *testing.T) {
 				t.Fatalf("formatCommand() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFormatLabels(t *testing.T) {
+	labels := map[string]string{"role": "runtime", "stack": "dracarys"}
+	if got, want := formatLabels(labels), "role=runtime,stack=dracarys"; got != want {
+		t.Fatalf("formatLabels() = %q, want %q", got, want)
+	}
+	if got := formatLabels(nil); got != "-" {
+		t.Fatalf("formatLabels(nil) = %q", got)
+	}
+}
+
+func TestResolveObservationNames(t *testing.T) {
+	statuses := []daemon.ProcessStatus{{Name: "runtime"}, {Name: "loop"}, {Name: "other"}}
+	store := catalog.New()
+	if err := store.Annotate("runtime", map[string]string{"stack": "dracarys"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Annotate("loop", map[string]string{"stack": "dracarys"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveView("dracarys", "stack=dracarys"); err != nil {
+		t.Fatal(err)
+	}
+	names, err := resolveObservationNames([]string{"other"}, "", "dracarys", statuses, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, ","), "loop,other,runtime"; got != want {
+		t.Fatalf("names = %q, want %q", got, want)
+	}
+}
+
+func TestMetadataAttributes(t *testing.T) {
+	got := metadataAttributes(map[string]string{"team": "orchard"})
+	if got["angl.metadata.team"] != "orchard" {
+		t.Fatalf("got %#v", got)
 	}
 }
