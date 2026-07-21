@@ -13,6 +13,32 @@ import (
 	"time"
 )
 
+func TestReadLastUsesReverseSuffix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.log")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200000; i++ {
+		fmt.Fprintf(file, "line-%06d payload payload payload\n", i)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	lines, err := ReadLast(context.Background(), []Source{{Path: path}}, 3, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lines[len(lines)-1].Text; got != "line-199999 payload payload payload" {
+		t.Fatalf("last = %q", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("reverse tail too slow: %v", elapsed)
+	}
+}
+
 func TestReadLastMultipleSourcesStableOrderAndTags(t *testing.T) {
 	dir := t.TempDir()
 	first := writeFile(t, dir, "first.log", "a\nb\nc\n")

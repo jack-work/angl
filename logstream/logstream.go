@@ -49,6 +49,9 @@ type Options struct {
 	// EventBuffer is the capacity of the returned event channel. The default
 	// is 128. Backpressure stops further polling rather than growing memory.
 	EventBuffer int
+	// MaxHistoryBytes optionally caps reverse history discovery. Zero means no
+	// byte cap: reading remains bounded to the suffix needed for TailLines.
+	MaxHistoryBytes int64
 }
 
 // Line is one line read from a source. Text excludes the newline and a CR in
@@ -95,7 +98,7 @@ func New(sources []Source, opts Options) (*Tailer, error) {
 		return nil, errors.New("logstream: at least one source is required")
 	}
 	if opts.TailLines < 0 || opts.MaxLineBytes < 0 || opts.ReadBufferBytes < 0 ||
-		opts.MaxReadBytesPerPoll < 0 || opts.MaxLinesPerPoll < 0 || opts.EventBuffer < 0 {
+		opts.MaxReadBytesPerPoll < 0 || opts.MaxLinesPerPoll < 0 || opts.EventBuffer < 0 || opts.MaxHistoryBytes < 0 {
 		return nil, errors.New("logstream: size and count options cannot be negative")
 	}
 	if opts.PollInterval < 0 {

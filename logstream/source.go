@@ -212,10 +212,14 @@ func snapshotFileContext(ctx context.Context, file *os.File, size int64, source 
 	if n == 0 {
 		return nil, nil
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	start, err := reverseTailStart(ctx, file, size, n, opts)
+	if err != nil {
 		return nil, err
 	}
-	reader := bufio.NewReaderSize(io.LimitReader(file, size), opts.ReadBufferBytes)
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReaderSize(io.LimitReader(file, size-start), opts.ReadBufferBytes)
 	parser := newLineParser(opts.MaxLineBytes)
 	ring := newLineRing(n)
 	buffer := make([]byte, opts.ReadBufferBytes)
@@ -241,4 +245,51 @@ func snapshotFileContext(ctx context.Context, file *os.File, size int64, source 
 		ring.add(line)
 	}
 	return ring.lines(), nil
+}
+
+func reverseTailStart(ctx context.Context, file *os.File, size int64, lines int, opts Options) (int64, error) {
+	if size == 0 || lines <= 0 {
+		return size, nil
+	}
+	const blockSize int64 = 64 << 10
+	position := size
+	found := 0
+	// A trailing newline terminates a line but does not require one extra
+	// historical record, so skip it during delimiter counting.
+	skipTrailing := true
+	for position > 0 {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		readSize := min(blockSize, position)
+		if opts.MaxHistoryBytes > 0 && size-(position-readSize) > opts.MaxHistoryBytes {
+			readSize = opts.MaxHistoryBytes - (size - position)
+			if readSize <= 0 {
+				return position, nil
+			}
+		}
+		position -= readSize
+		buffer := make([]byte, readSize)
+		if _, err := file.ReadAt(buffer, position); err != nil && !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+		for i := len(buffer) - 1; i >= 0; i-- {
+			if buffer[i] != '\n' {
+				continue
+			}
+			if skipTrailing && position+int64(i) == size-1 {
+				skipTrailing = false
+				continue
+			}
+			skipTrailing = false
+			found++
+			if found == lines {
+				return position + int64(i) + 1, nil
+			}
+		}
+		if opts.MaxHistoryBytes > 0 && size-position >= opts.MaxHistoryBytes {
+			return position, nil
+		}
+	}
+	return 0, nil
 }
