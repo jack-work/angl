@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -34,6 +35,12 @@ func TestFormatCommand(t *testing.T) {
 			args:    []string{"--message", "hello world", ""},
 			want:    `"C:\Program Files\tool.exe" --message "hello world" ""`,
 		},
+		{
+			name:    "quotes embedded quotes",
+			command: "tool.exe",
+			args:    []string{`say "hello"`, `C:\path with space\`},
+			want:    `tool.exe "say \"hello\"" "C:\path with space\\"`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -42,6 +49,47 @@ func TestFormatCommand(t *testing.T) {
 				t.Fatalf("formatCommand() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestListedStatusIncludesFullCommandLine(t *testing.T) {
+	status := daemon.ProcessStatus{
+		Name:    "monitor",
+		Command: `C:\Program Files\figaro.exe`,
+		Args:    []string{"send", "--", "a deliberately long prompt that must not be truncated"},
+	}
+
+	got := newListedStatus(status, nil)
+	want := `"C:\Program Files\figaro.exe" send -- "a deliberately long prompt that must not be truncated"`
+	if got.CommandLine != want {
+		t.Fatalf("CommandLine = %q, want %q", got.CommandLine, want)
+	}
+
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"command", "args", "command_line"} {
+		if _, ok := fields[field]; !ok {
+			t.Errorf("JSON missing %q: %s", field, data)
+		}
+	}
+	var commandLine string
+	if err := json.Unmarshal(fields["command_line"], &commandLine); err != nil {
+		t.Fatal(err)
+	}
+	if commandLine != want {
+		t.Fatalf("JSON command_line = %q, want %q", commandLine, want)
+	}
+}
+
+func TestSnipTableCell(t *testing.T) {
+	if got, want := snipTableCell("0123456789", 8), "01234..."; got != want {
+		t.Fatalf("snipTableCell() = %q, want %q", got, want)
 	}
 }
 

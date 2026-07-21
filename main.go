@@ -197,6 +197,12 @@ func cmdListArgs(args []string) error {
 	return cmdList(asJSON, selector)
 }
 
+type listedStatus struct {
+	daemon.ProcessStatus
+	CommandLine string            `json:"command_line"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+}
+
 func cmdList(asJSON bool, selector string) error {
 	result, err := rpcCallRaw("list", nil)
 	if err != nil {
@@ -228,13 +234,9 @@ func cmdList(asJSON bool, selector string) error {
 		return nil
 	}
 	if asJSON {
-		type listedStatus struct {
-			daemon.ProcessStatus
-			Metadata map[string]string `json:"metadata,omitempty"`
-		}
 		listed := make([]listedStatus, 0, len(statuses))
 		for _, status := range statuses {
-			listed = append(listed, listedStatus{ProcessStatus: status, Metadata: cloneLabels(store.Labels[status.Name])})
+			listed = append(listed, newListedStatus(status, store.Labels[status.Name]))
 		}
 		pretty, _ := json.MarshalIndent(listed, "", "  ")
 		fmt.Println(string(pretty))
@@ -274,7 +276,7 @@ func cmdList(asJSON bool, selector string) error {
 		}
 		t.AppendRow(table.Row{
 			sanitizeCell(status.Name, 30), state, pid, uptime, restarts,
-			sanitizeCell(formatCommand(status.Command, status.Args), 80),
+			sanitizeCell(formatCommand(status.Command, status.Args), 0),
 			sanitizeCell(status.Charge, 60), formatLabels(store.Labels[status.Name]),
 		})
 	}
@@ -284,12 +286,20 @@ func cmdList(asJSON bool, selector string) error {
 		{Number: 3, Align: text.AlignRight},
 		{Number: 4, Align: text.AlignRight},
 		{Number: 5, Align: text.AlignRight},
-		{Number: 6, WidthMax: 48, WidthMaxEnforcer: text.WrapSoft},
+		{Number: 6, WidthMax: 48, WidthMaxEnforcer: snipTableCell},
 		{Number: 7, WidthMax: 42, WidthMaxEnforcer: text.WrapSoft},
 		{Number: 8, WidthMax: 36, WidthMaxEnforcer: text.WrapSoft},
 	})
 	t.Render()
 	return nil
+}
+
+func newListedStatus(status daemon.ProcessStatus, labels map[string]string) listedStatus {
+	return listedStatus{
+		ProcessStatus: status,
+		CommandLine:   formatCommand(status.Command, status.Args),
+		Metadata:      cloneLabels(labels),
+	}
 }
 
 func formatLabels(labels map[string]string) string {
@@ -318,10 +328,11 @@ func formatCommand(command string, args []string) string {
 }
 
 func quoteCommandPart(part string) string {
-	if part == "" || strings.ContainsAny(part, " \t\r\n\"") {
-		return `"` + strings.ReplaceAll(part, `"`, `\"`) + `"`
-	}
-	return part
+	return syscall.EscapeArg(part)
+}
+
+func snipTableCell(s string, max int) string {
+	return text.Snip(s, max, "...")
 }
 
 func sanitizeCell(s string, max int) string {

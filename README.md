@@ -60,8 +60,8 @@ Create `$HOME\.config\angl\config.json`:
 # Install the daemon as a logon task and start it now
 .\angl.exe install
 
-# Inspect and control processes
-.\angl.exe ls
+# List output includes the executable, argument array, and a complete reconstructed command line
+.\angl.exe ls --json
 .\angl.exe status my-api
 .\angl.exe start my-api
 .\angl.exe stop my-api
@@ -78,6 +78,8 @@ Create `$HOME\.config\angl\config.json`:
 # Remove the daemon's logon task
 .\angl.exe uninstall
 ```
+
+`angl ls` shows a compact, ellipsis-truncated command column for scanning. `angl ls --json` preserves the exact `command` and `args` fields and also includes a complete, Windows-quoted `command_line` string for each process.
 
 Logs live under `$HOME\.config\angl\logs`. Each process log rotates to `.prev` at 10 MiB.
 
