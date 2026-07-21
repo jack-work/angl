@@ -190,8 +190,9 @@ func TestParseSeverity(t *testing.T) {
 		want int
 	}{
 		{"[DBG] request", SeverityDebug},
-		{"2026-07-20 warning: slow", SeverityWarn},
-		{"level=critical stopped", SeverityFatal},
+		{"2026-07-20T01:02:03Z warning: slow", SeverityWarn},
+		{"critical stopped", SeverityFatal},
+		{"completed error budget calculation", 0},
 		{"ordinary message", 0},
 	}
 	for _, tc := range tests {

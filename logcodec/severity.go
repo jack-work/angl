@@ -1,35 +1,32 @@
 package logcodec
 
 import (
+	"regexp"
 	"strings"
-	"unicode"
 )
+
+var severityPrefix = regexp.MustCompile(`(?i)^(?:\s*\d{4}-\d{2}-\d{2}[T ][^ ]+\s+)?\s*(?:\[|<)?(trace|trc|debug|dbg|info|information|notice|warn|warning|error|err|fatal|panic|critical|crit)(?:\]|>|:|\s|$)`)
 
 // ParseSeverity finds conventional log-level tokens near the beginning of a
 // line. It returns the OTEL number and canonical uppercase name.
 func ParseSeverity(line string) (int, string, bool) {
-	// Levels normally occur in a prefix. Bounding work also prevents a word in
-	// a long payload from unexpectedly changing the record's severity.
-	if len(line) > 192 {
-		line = line[:192]
+	match := severityPrefix.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return 0, "", false
 	}
-	for _, token := range strings.FieldsFunc(line, func(r rune) bool {
-		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
-	}) {
-		switch strings.ToLower(token) {
-		case "trace", "trc":
-			return SeverityTrace, "TRACE", true
-		case "debug", "dbg":
-			return SeverityDebug, "DEBUG", true
-		case "info", "information", "notice":
-			return SeverityInfo, "INFO", true
-		case "warn", "warning":
-			return SeverityWarn, "WARN", true
-		case "error", "err":
-			return SeverityError, "ERROR", true
-		case "fatal", "panic", "critical", "crit":
-			return SeverityFatal, "FATAL", true
-		}
+	switch strings.ToLower(match[1]) {
+	case "trace", "trc":
+		return SeverityTrace, "TRACE", true
+	case "debug", "dbg":
+		return SeverityDebug, "DEBUG", true
+	case "info", "information", "notice":
+		return SeverityInfo, "INFO", true
+	case "warn", "warning":
+		return SeverityWarn, "WARN", true
+	case "error", "err":
+		return SeverityError, "ERROR", true
+	case "fatal", "panic", "critical", "crit":
+		return SeverityFatal, "FATAL", true
 	}
 	return 0, "", false
 }
