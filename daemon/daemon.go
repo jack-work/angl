@@ -23,6 +23,7 @@ type Daemon struct {
 	transientPath string
 	logger        *log.Logger
 	logFile       *os.File
+	inventory     inventoryStream
 }
 
 func New(configPath string) (*Daemon, error) {
@@ -88,6 +89,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.logger.Printf("[%s] transient loaded (stopped)", name)
 	}
 	d.mu.Unlock()
+
+	if err := d.initInventoryStream(); err != nil {
+		return err
+	}
+	go d.watchInventory(ctx.Done())
 
 	srv := NewServer(d)
 	err := srv.Run(ctx)

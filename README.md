@@ -60,6 +60,9 @@ Create `$HOME\.config\angl\config.json`:
 # Install the daemon as a logon task and start it now
 .\angl.exe install
 
+# Watch the same inventory update live in an interactive terminal
+.\angl.exe listen
+
 # List output includes the executable, argument array, and a complete reconstructed command line
 .\angl.exe ls --json
 .\angl.exe status my-api
@@ -78,6 +81,8 @@ Create `$HOME\.config\angl\config.json`:
 # Remove the daemon's logon task
 .\angl.exe uninstall
 ```
+
+`angl listen` is a separate TUI client process. It registers a long-lived listener over the existing named-pipe RPC connection, receives an initial versioned snapshot, then applies delta-compressed upsert/remove patches. The daemon may send a full structured snapshot when it is smaller or when a slow client needs recovery. New and changed rows carry a `*` marker for three seconds; metadata edits are included in the same stream. Use arrow keys or `j`/`k` to move and `q` or Escape to quit.
 
 `angl ls` sizes itself to the current terminal. On narrower terminals it snips cells and progressively omits secondary columns rather than wrapping beyond the viewport; `angl ls --json` preserves exact `command` and `args` fields plus a complete, Windows-quoted `command_line` string for every process.
 

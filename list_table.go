@@ -4,6 +4,7 @@ package main
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/jack-work/angl/catalog"
 	"github.com/jack-work/angl/daemon"
@@ -15,10 +16,18 @@ import (
 // lossless; the human table progressively drops secondary columns and snips
 // cells as the terminal narrows.
 func renderListTable(statuses []daemon.ProcessStatus, store catalog.Store, width int) string {
+	return renderListTableWithSelection(statuses, store, width, -1)
+}
+
+func renderListTableWithSelection(statuses []daemon.ProcessStatus, store catalog.Store, width, selected int) string {
 	t := table.NewWriter()
 	t.SetStyle(table.StyleRounded)
 	t.AppendHeader(table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS", "COMMAND", "CHARGE", "METADATA"})
-	for _, status := range statuses {
+	selectedName := ""
+	for index, status := range statuses {
+		if index == selected {
+			selectedName = status.Name
+		}
 		pid := "-"
 		if status.PID > 0 {
 			pid = strconv.Itoa(status.PID)
@@ -45,10 +54,22 @@ func renderListTable(statuses []daemon.ProcessStatus, store catalog.Store, width
 		case daemon.StateDisabled:
 			state = text.Faint.Sprint(state)
 		}
+		name := sanitizeCell(status.Name, 0)
+		if strings.HasPrefix(name, "* ") {
+			name = text.FgHiYellow.Sprint(name)
+		}
 		t.AppendRow(table.Row{
-			sanitizeCell(status.Name, 0), state, pid, uptime, restarts,
+			name, state, pid, uptime, restarts,
 			sanitizeCell(formatCommand(status.Command, status.Args), 0),
 			sanitizeCell(status.Charge, 0), formatLabels(store.Labels[status.Name]),
+		})
+	}
+	if selectedName != "" {
+		t.SetRowPainter(func(row table.Row) text.Colors {
+			if name, ok := row[0].(string); ok && text.StripEscape(name) == sanitizeCell(selectedName, 0) {
+				return text.Colors{text.BgHiBlack}
+			}
+			return nil
 		})
 	}
 

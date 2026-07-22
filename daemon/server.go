@@ -61,7 +61,41 @@ func (s *Server) handleConn(conn net.Conn) {
 		json.NewEncoder(conn).Encode(rpcErr(nil, -32700, "parse error"))
 		return
 	}
+	if req.Method == "listen" {
+		s.handleListen(conn, req)
+		return
+	}
 	json.NewEncoder(conn).Encode(s.daemon.HandleRPC(req))
+}
+
+func (s *Server) handleListen(conn net.Conn, req RPCRequest) {
+	// A listener is a separate long-lived client process. Clear the ordinary
+	// RPC deadline; disconnects are discovered by the next notification write.
+	conn.SetDeadline(time.Time{})
+	id, snapshot, updates := s.daemon.SubscribeInventory()
+	defer s.daemon.UnsubscribeInventory(id)
+
+	encoder := json.NewEncoder(conn)
+	registered := ListenRegistration{ListenerID: id, Snapshot: snapshot}
+	if err := encoder.Encode(rpcOK(req.ID, registered)); err != nil {
+		return
+	}
+	disconnected := make(chan struct{})
+	go func() {
+		var oneByte [1]byte
+		_, _ = conn.Read(oneByte[:])
+		close(disconnected)
+	}()
+	for {
+		select {
+		case update := <-updates:
+			if err := encoder.Encode(rpcNotification("list.update", update)); err != nil {
+				return
+			}
+		case <-disconnected:
+			return
+		}
+	}
 }
 
 // IsDaemonRunning checks whether another daemon owns the control pipe.

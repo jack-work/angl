@@ -42,6 +42,8 @@ func main() {
 		err = cmdDaemon(os.Args[2:])
 	case "list", "ls":
 		err = cmdListArgs(os.Args[2:])
+	case "listen", "watch":
+		err = cmdListenArgs(os.Args[2:])
 	case "status":
 		err = withName(os.Args[2:], cmdStatus)
 	case "start":
@@ -227,6 +229,10 @@ func cmdList(asJSON bool, selector string) error {
 		}
 		statuses = filtered
 	}
+	return renderListedStatuses(statuses, store, asJSON)
+}
+
+func renderListedStatuses(statuses []daemon.ProcessStatus, store catalog.Store, asJSON bool) error {
 	if len(statuses) == 0 {
 		if asJSON {
 			fmt.Println("[]")
@@ -614,6 +620,7 @@ Daemon:
 
 Process control:
   ls, list [--json] [-l <selector>]   List angls with metadata
+  listen, watch                        Live interactive angl inventory
   status <name>             Detailed status of an angl
   start <name>              Start an angl
   stop <name>               Stop an angl
@@ -660,6 +667,11 @@ Other:
 Config: ~/.config/angl/config.json
 Transient: ~/.config/angl/transient.json
 Catalog: ~/.config/angl/catalog.json
+
+Listen keys:
+  Up/k, Down/j   Move selection
+  Home/g, End/G  Jump to first/last angl
+  q, Esc, Ctrl-C Quit
 
 Semantics:
   Persistent process (no interval): runs continuously, restarts on crash

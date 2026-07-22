@@ -12,7 +12,7 @@ type RPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
-	ID      interface{}     `json:"id"`
+	ID      interface{}     `json:"id,omitempty"`
 }
 
 type RPCResponse struct {
@@ -42,6 +42,9 @@ type registerParam struct {
 
 func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 	switch req.Method {
+	case "listen":
+		return rpcErr(req.ID, -32001, "listen requires a streaming RPC connection")
+
 	case "list":
 		return rpcOK(req.ID, d.List())
 
@@ -159,4 +162,9 @@ func rpcOK(id interface{}, result interface{}) RPCResponse {
 
 func rpcErr(id interface{}, code int, msg string) RPCResponse {
 	return RPCResponse{JSONRPC: "2.0", ID: id, Error: &RPCError{Code: code, Message: msg}}
+}
+
+func rpcNotification(method string, params interface{}) RPCRequest {
+	raw, _ := json.Marshal(params)
+	return RPCRequest{JSONRPC: "2.0", Method: method, Params: raw}
 }
