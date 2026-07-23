@@ -4,14 +4,90 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jack-work/angl/catalog"
 	"github.com/jack-work/angl/daemon"
 	"github.com/jedib0t/go-pretty/v6/text"
 )
+
+func TestConnectDaemonUsesExistingPipe(t *testing.T) {
+	oldDial, oldLaunch := dialDaemonPipe, launchDetachedDaemon
+	defer func() { dialDaemonPipe, launchDetachedDaemon = oldDial, oldLaunch }()
+
+	client, server := net.Pipe()
+	defer server.Close()
+	dialDaemonPipe = func(time.Duration) (net.Conn, error) { return client, nil }
+	launches := 0
+	launchDetachedDaemon = func() (int, error) {
+		launches++
+		return 42, nil
+	}
+
+	conn, err := connectDaemon(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if launches != 0 {
+		t.Fatalf("launches = %d, want 0", launches)
+	}
+}
+
+func TestConnectDaemonStartsAndWaitsForPipe(t *testing.T) {
+	oldDial, oldLaunch := dialDaemonPipe, launchDetachedDaemon
+	defer func() { dialDaemonPipe, launchDetachedDaemon = oldDial, oldLaunch }()
+
+	calls := 0
+	client, server := net.Pipe()
+	defer server.Close()
+	dialDaemonPipe = func(time.Duration) (net.Conn, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("pipe not found")
+		}
+		return client, nil
+	}
+	launches := 0
+	launchDetachedDaemon = func() (int, error) {
+		launches++
+		return 42, nil
+	}
+
+	conn, err := connectDaemon(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if launches != 1 {
+		t.Fatalf("launches = %d, want 1", launches)
+	}
+	if calls != 2 {
+		t.Fatalf("dial calls = %d, want 2", calls)
+	}
+}
+
+func TestConnectDaemonReportsAutomaticStartFailure(t *testing.T) {
+	oldDial, oldLaunch := dialDaemonPipe, launchDetachedDaemon
+	defer func() { dialDaemonPipe, launchDetachedDaemon = oldDial, oldLaunch }()
+
+	dialDaemonPipe = func(time.Duration) (net.Conn, error) {
+		return nil, errors.New("pipe not found")
+	}
+	launchDetachedDaemon = func() (int, error) {
+		return 0, errors.New("launch denied")
+	}
+
+	_, err := connectDaemon(time.Second)
+	if err == nil || !strings.Contains(err.Error(), "automatic start failed: launch denied") {
+		t.Fatalf("error = %v", err)
+	}
+}
 
 func TestFormatCommand(t *testing.T) {
 	tests := []struct {

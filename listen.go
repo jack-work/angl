@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Microsoft/go-winio"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jack-work/angl/catalog"
@@ -105,9 +104,9 @@ func (m listenModel) Init() tea.Cmd {
 func connectListener(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		timeout := 5 * time.Second
-		conn, err := winio.DialPipe(pipeName, &timeout)
+		conn, err := connectDaemon(timeout)
 		if err != nil {
-			return listenErrMsg{fmt.Errorf("cannot reach daemon: %w", err)}
+			return listenErrMsg{err}
 		}
 		req := daemon.RPCRequest{JSONRPC: "2.0", Method: "listen", ID: 1}
 		if err := json.NewEncoder(conn).Encode(req); err != nil {

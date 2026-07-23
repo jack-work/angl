@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,12 +23,21 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.9.0"
+const version = "0.9.1"
 
 const (
-	detachedProcess = 0x00000008
-	createNoWindow  = 0x08000000
-	pipeName        = `\\.\pipe\angld`
+	detachedProcess     = 0x00000008
+	createNoWindow      = 0x08000000
+	pipeName            = `\\.\pipe\angld`
+	daemonStartupWait   = 5 * time.Second
+	daemonDialRetryWait = 25 * time.Millisecond
+)
+
+var (
+	dialDaemonPipe = func(timeout time.Duration) (net.Conn, error) {
+		return winio.DialPipe(pipeName, &timeout)
+	}
+	launchDetachedDaemon = startDetachedDaemon
 )
 
 func main() {
@@ -117,19 +127,11 @@ func cmdDaemon(args []string) error {
 		if daemon.IsDaemonRunning() {
 			return fmt.Errorf("daemon already running")
 		}
-		exe, err := os.Executable()
+		pid, err := startDetachedDaemon()
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, "daemon")
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			CreationFlags: detachedProcess | createNoWindow,
-		}
-		cmd.Env = os.Environ()
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("fork: %w", err)
-		}
-		fmt.Printf("angld started (pid %d)\n", cmd.Process.Pid)
+		fmt.Printf("angld started (pid %d)\n", pid)
 		return nil
 	}
 
@@ -340,6 +342,58 @@ func sanitizeCell(s string, max int) string {
 
 // --- JSON-RPC client ---
 
+func startDetachedDaemon() (int, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return 0, fmt.Errorf("resolve executable: %w", err)
+	}
+	cmd := exec.Command(exe, "daemon")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: detachedProcess | createNoWindow,
+	}
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start daemon: %w", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Release(); err != nil {
+		return 0, fmt.Errorf("release daemon process: %w", err)
+	}
+	return pid, nil
+}
+
+func connectDaemon(timeout time.Duration) (net.Conn, error) {
+	probeTimeout := 100 * time.Millisecond
+	if timeout < probeTimeout {
+		probeTimeout = timeout
+	}
+	conn, initialErr := dialDaemonPipe(probeTimeout)
+	if initialErr == nil {
+		return conn, nil
+	}
+
+	if _, err := launchDetachedDaemon(); err != nil {
+		return nil, fmt.Errorf("cannot reach daemon and automatic start failed: %w", err)
+	}
+
+	wait := daemonStartupWait
+	if timeout < wait {
+		wait = timeout
+	}
+	deadline := time.Now().Add(wait)
+	lastErr := initialErr
+	for time.Now().Before(deadline) {
+		attemptTimeout := 100 * time.Millisecond
+		conn, err := dialDaemonPipe(attemptTimeout)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		time.Sleep(daemonDialRetryWait)
+	}
+	return nil, fmt.Errorf("cannot reach daemon after automatic start: %w", lastErr)
+}
+
 func rpcCallRaw(method string, params interface{}) (json.RawMessage, error) {
 	req := daemon.RPCRequest{
 		JSONRPC: "2.0",
@@ -357,9 +411,9 @@ func rpcCallRaw(method string, params interface{}) (json.RawMessage, error) {
 	}
 
 	timeout := 30 * time.Second
-	conn, err := winio.DialPipe(pipeName, &timeout)
+	conn, err := connectDaemon(timeout)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach daemon (is it running?): %w", err)
+		return nil, err
 	}
 	defer conn.Close()
 

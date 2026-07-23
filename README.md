@@ -56,11 +56,14 @@ Create `$HOME\.config\angl\config.json`:
 
 ## Run
 
+Daemon-backed commands automatically start the daemon when it is not running. The launch is detached, silent, and uses Windows' no-window process flag. Use `install` only when you want eager startup at every logon and Task Scheduler restart-on-failure protection.
+
 ```powershell
-# Install the daemon as a logon task and start it now
+# Optional: install the daemon as a logon task and start it now
 .\angl.exe install
 
-# Watch the same inventory update live in an interactive terminal
+# With or without install, this starts the daemon on demand if needed
+# and then watches the inventory in an interactive terminal
 .\angl.exe listen
 
 # List output includes the executable, argument array, and a complete reconstructed command line
