@@ -100,6 +100,47 @@ func TestSaveConfigReplacesExistingFile(t *testing.T) {
 	}
 }
 
+func TestSingWakesCurrentBackoffWait(t *testing.T) {
+	process := NewProcess("singer", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
+	process.mu.Lock()
+	wake := process.beginBackoffLocked(time.Now(), time.Hour)
+	process.mu.Unlock()
+
+	waited := make(chan bool, 1)
+	go func() { waited <- process.wait(context.Background(), time.Hour, wake) }()
+
+	if err := process.Sing(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case completed := <-waited:
+		if !completed {
+			t.Fatal("sung wait reported cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sing did not wake backoff")
+	}
+	if err := process.Sing(); err == nil {
+		t.Fatal("second sing unexpectedly succeeded outside an active backoff wait")
+	}
+}
+
+func TestSingRejectsNonBackoffState(t *testing.T) {
+	process := NewProcess("quiet", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
+	if err := process.Sing(); err == nil {
+		t.Fatal("sing unexpectedly accepted a stopped angl")
+	}
+}
+
+func TestSingUsesNormalBackoffProgression(t *testing.T) {
+	if got, want := nextBackoff(initialBackoff), 4*time.Second; got != want {
+		t.Fatalf("next backoff after a sung initial wait = %v, want %v", got, want)
+	}
+	if got := nextBackoff(maxBackoff); got != maxBackoff {
+		t.Fatalf("capped next backoff = %v, want %v", got, maxBackoff)
+	}
+}
+
 func TestStartFailureHonorsLimitAndStaysFailed(t *testing.T) {
 	process := NewProcess("missing", AnglDef{
 		Command:     filepath.Join(t.TempDir(), "does-not-exist.exe"),

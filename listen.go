@@ -38,6 +38,11 @@ type listenUpdateMsg struct {
 
 type listenErrMsg struct{ err error }
 type listenTickMsg time.Time
+type listenActionMsg struct {
+	action string
+	name   string
+	err    error
+}
 
 type listenModel struct {
 	ctx       context.Context
@@ -53,6 +58,10 @@ type listenModel struct {
 	width     int
 	height    int
 	connected bool
+	expanded  bool
+	action    string
+	notice    string
+	noticeAt  time.Time
 	err       error
 	quitting  bool
 }
@@ -159,6 +168,13 @@ func listenTick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return listenTickMsg(t) })
 }
 
+func runListenAction(action, name string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := rpcCallRaw(action, nameP(name))
+		return listenActionMsg{action: action, name: name, err: err}
+	}
+}
+
 func (m listenModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -184,6 +200,37 @@ func (m listenModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.items) > 0 {
 				m.selected = len(m.items) - 1
 			}
+		case "enter":
+			if len(m.items) > 0 {
+				m.expanded = !m.expanded
+			}
+		case "s":
+			if m.action != "" {
+				return m, nil
+			}
+			name := m.selectedName()
+			if name == "" {
+				return m, nil
+			}
+			action := "stop"
+			if m.items[name].State == daemon.StateBackoff {
+				action = "sing"
+			}
+			m.action = action
+			m.notice = action + " " + name + "…"
+			return m, runListenAction(action, name)
+		case "d", "u":
+			if m.action != "" {
+				return m, nil
+			}
+			name := m.selectedName()
+			if name == "" {
+				return m, nil
+			}
+			action := map[string]string{"d": "disable", "u": "unregister"}[msg.String()]
+			m.action = action
+			m.notice = action + " " + name + "…"
+			return m, runListenAction(action, name)
 		}
 
 	case tea.WindowSizeMsg:
@@ -214,6 +261,18 @@ func (m listenModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connected = false
 		}
 
+	case listenActionMsg:
+		m.action = ""
+		m.noticeAt = time.Now()
+		if msg.err != nil {
+			m.notice = fmt.Sprintf("%s %s failed: %v", msg.action, msg.name, msg.err)
+		} else {
+			verb := map[string]string{
+				"stop": "stopped", "sing": "sang", "disable": "disabled", "unregister": "unregistered",
+			}[msg.action]
+			m.notice = verb + " " + msg.name
+		}
+
 	case listenTickMsg:
 		now := time.Time(msg)
 		m.refreshElapsed(now)
@@ -225,6 +284,10 @@ func (m listenModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.recentAt.IsZero() && now.Sub(m.recentAt) >= changedHighlightFor {
 			m.recent = nil
 			m.recentAt = time.Time{}
+		}
+		if !m.noticeAt.IsZero() && now.Sub(m.noticeAt) >= changedHighlightFor {
+			m.notice = ""
+			m.noticeAt = time.Time{}
 		}
 		return m, listenTick()
 	}
@@ -446,8 +509,20 @@ func (m listenModel) View() string {
 		store.Labels[displayName] = item.Metadata
 	}
 	body := renderListTableWithSelection(statuses, store, width, m.selected)
+	if m.expanded {
+		if name := m.selectedName(); name != "" {
+			body += "\n" + renderListDetail(m.items[name], width)
+		}
+	}
 
-	footer := dimStyle.Render("↑/k ↓/j move • q/esc quit • * changed in last 3s • RPC deltas with snapshot recovery")
+	sAction := "stop"
+	if name := m.selectedName(); name != "" && m.items[name].State == daemon.StateBackoff {
+		sAction = "sing"
+	}
+	footer := dimStyle.Render(fmt.Sprintf("↑/k ↓/j move • enter details • s %s • d disable • u unregister • q/esc quit", sAction))
+	if m.notice != "" {
+		footer = m.notice + "\n" + footer
+	}
 	if len(m.recent) > 0 {
 		footer = "changes: " + strings.Join(m.recent, ", ") + "\n" + footer
 	}

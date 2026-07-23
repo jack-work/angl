@@ -69,6 +69,7 @@ Create `$HOME\.config\angl\config.json`:
 .\angl.exe start my-api
 .\angl.exe stop my-api
 .\angl.exe restart my-api
+.\angl.exe sing my-api       # if backoff: run now, then continue normal retry progression
 .\angl.exe tail my-api
 
 # Reconcile edits to config.json
@@ -82,7 +83,7 @@ Create `$HOME\.config\angl\config.json`:
 .\angl.exe uninstall
 ```
 
-`angl listen` is a separate TUI client process. It registers a long-lived listener over the existing named-pipe RPC connection, receives an initial versioned snapshot, then applies delta-compressed upsert/remove patches. The daemon may send a full structured snapshot when it is smaller or when a slow client needs recovery. New and changed rows carry a `*` marker for three seconds; metadata edits are included in the same stream. Use arrow keys or `j`/`k` to move and `q` or Escape to quit.
+`angl listen` is a separate TUI client process. It registers a long-lived listener over the existing named-pipe RPC connection, receives an initial versioned snapshot, then applies delta-compressed upsert/remove patches. The daemon may send a full structured snapshot when it is smaller or when a slow client needs recovery. New and changed rows carry a `*` marker for three seconds; metadata edits are included in the same stream. Use arrow keys or `j`/`k` to move, Enter to toggle full wrapped details for the columns visible at the current terminal width, `s` to sing an angl in backoff (or stop one in any other state), `d` to disable, `u` to unregister, and `q` or Escape to quit. Mutations use ordinary RPC calls and report success or failure in the TUI.
 
 `angl ls` sizes itself to the current terminal. On narrower terminals it snips cells and progressively omits secondary columns rather than wrapping beyond the viewport; `angl ls --json` preserves exact `command` and `args` fields plus a complete, Windows-quoted `command_line` string for every process.
 

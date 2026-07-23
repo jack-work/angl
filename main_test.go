@@ -123,6 +123,34 @@ func TestRenderListTableFitsTerminalWidth(t *testing.T) {
 	}
 }
 
+func TestRenderListDetailWrapsFullVisibleValues(t *testing.T) {
+	item := daemon.InventoryItem{
+		ProcessStatus: daemon.ProcessStatus{
+			Name: "detail", State: daemon.StateBackoff, Command: "tool.exe",
+			Args:   []string{strings.Repeat("argument ", 12) + "FULL-COMMAND-TAIL"},
+			Charge: strings.Repeat("charge ", 10) + "FULL-CHARGE-TAIL",
+		},
+		Metadata: map[string]string{"note": strings.Repeat("metadata ", 8) + "FULL-METADATA-TAIL"},
+	}
+	for _, width := range []int{48, 80, 120, 180} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			got := renderListDetail(item, width)
+			lines := strings.Split(got, "\n")
+			for lineNumber, line := range lines {
+				if gotWidth := text.StringWidthWithoutEscSequences(line); gotWidth > width {
+					t.Fatalf("line %d width = %d, want <= %d:\n%s", lineNumber+1, gotWidth, width, got)
+				}
+			}
+			if strings.Contains(got, "...") {
+				t.Fatalf("detail snipped a visible value at width %d:\n%s", width, got)
+			}
+			if len(lines) <= 5 {
+				t.Fatalf("long visible values did not wrap at width %d:\n%s", width, got)
+			}
+		})
+	}
+}
+
 func TestStatusMatchesCoreFieldsAndMetadata(t *testing.T) {
 	status := daemon.ProcessStatus{Name: "api", State: daemon.StateRunning, Enabled: true, Interval: "1h"}
 	for selectorText, want := range map[string]bool{

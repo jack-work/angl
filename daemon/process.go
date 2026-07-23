@@ -70,6 +70,7 @@ type Process struct {
 
 	cancel context.CancelFunc
 	done   chan struct{}
+	wake   chan struct{}
 }
 
 func NewProcess(name string, def AnglDef, logger *log.Logger) *Process {
@@ -113,6 +114,22 @@ func (p *Process) Stop() {
 	if done != nil {
 		<-done
 	}
+}
+
+// Sing wakes an angl whose retry or heartbeat timer is in backoff. The run
+// loop proceeds exactly as if that timer had elapsed, including advancing the
+// exponential retry period after the attempted run.
+func (p *Process) Sing() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state != StateBackoff || p.wake == nil {
+		return fmt.Errorf("%q is not in backoff (state: %s)", p.name, p.state)
+	}
+	close(p.wake)
+	p.wake = nil
+	p.nextRun = time.Now()
+	p.logger.Printf("[%s] sung; running now", p.name)
+	return nil
 }
 
 func (p *Process) Status() ProcessStatus {
@@ -167,6 +184,7 @@ func (p *Process) runLoop(ctx context.Context) {
 		d := p.done
 		p.done = nil
 		p.cancel = nil
+		p.wake = nil
 		p.mu.Unlock()
 		if d != nil {
 			close(d)
@@ -220,11 +238,10 @@ func (p *Process) runLoop(ctx context.Context) {
 				p.logger.Printf("[%s] max restarts reached (%d/%d) -- giving up", p.name, count, max)
 				return
 			}
-			p.state = StateBackoff
-			p.nextRun = now.Add(backoff)
+			wake := p.beginBackoffLocked(now, backoff)
 			p.mu.Unlock()
 
-			if !p.wait(ctx, backoff) {
+			if !p.wait(ctx, backoff, wake) {
 				return
 			}
 			backoff = nextBackoff(backoff)
@@ -258,12 +275,11 @@ func (p *Process) runLoop(ctx context.Context) {
 				interval, _ := time.ParseDuration(p.def.Interval)
 				now := time.Now()
 				p.mu.Lock()
-				p.state = StateBackoff
 				p.lastExit = now
-				p.nextRun = now.Add(interval)
+				wake := p.beginBackoffLocked(now, interval)
 				p.mu.Unlock()
 				p.logger.Printf("[%s] next run in %v", p.name, interval)
-				if !p.wait(ctx, interval) {
+				if !p.wait(ctx, interval, wake) {
 					return
 				}
 				continue
@@ -288,12 +304,11 @@ func (p *Process) runLoop(ctx context.Context) {
 				p.logger.Printf("[%s] max restarts reached (%d/%d) -- giving up", p.name, count, max)
 				return
 			}
-			p.state = StateBackoff
-			p.nextRun = restartNow.Add(backoff)
+			wake := p.beginBackoffLocked(restartNow, backoff)
 			p.mu.Unlock()
 
 			p.logger.Printf("[%s] restart in %v (%d/%s)", p.name, backoff, count, restartLimit(max))
-			if !p.wait(ctx, backoff) {
+			if !p.wait(ctx, backoff, wake) {
 				return
 			}
 			backoff = nextBackoff(backoff)
@@ -310,16 +325,41 @@ func (p *Process) runLoop(ctx context.Context) {
 	}
 }
 
-// wait returns true if the duration elapsed and false if ctx was cancelled.
-func (p *Process) wait(ctx context.Context, d time.Duration) bool {
+// beginBackoffLocked records a distinct wake channel for this wait. Callers
+// must hold p.mu. A per-wait channel prevents a late sing from leaking into a
+// later backoff period.
+func (p *Process) beginBackoffLocked(now time.Time, d time.Duration) <-chan struct{} {
+	wake := make(chan struct{})
+	p.state = StateBackoff
+	p.nextRun = now.Add(d)
+	p.wake = wake
+	return wake
+}
+
+// wait returns true if the duration elapsed or the angl was sung, and false
+// only when the process context was cancelled.
+func (p *Process) wait(ctx context.Context, d time.Duration, wake <-chan struct{}) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+	completed := true
 	select {
 	case <-timer.C:
-		return true
+	case <-wake:
 	case <-ctx.Done():
-		return false
+		completed = false
 	}
+	// Cancellation wins if it raced with either timer completion or sing. This
+	// prevents Stop from allowing one final launch when both channels are ready.
+	if ctx.Err() != nil {
+		completed = false
+	}
+
+	p.mu.Lock()
+	if p.wake == wake {
+		p.wake = nil
+	}
+	p.mu.Unlock()
+	return completed
 }
 
 func LogPath(name string) string {

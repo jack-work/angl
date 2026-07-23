@@ -163,6 +163,20 @@ func (d *Daemon) RestartAngl(name string) error {
 	return d.StartAngl(name)
 }
 
+func (d *Daemon) SingAngl(name string) error {
+	d.mu.RLock()
+	p, ok := d.processes[name]
+	d.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("unknown angl %q", name)
+	}
+	if err := p.Sing(); err != nil {
+		return err
+	}
+	d.logger.Printf("sung %s", name)
+	return nil
+}
+
 func (d *Daemon) Reload() (ReloadResult, error) {
 	cfg, err := LoadConfig(d.configPath)
 	if err != nil {

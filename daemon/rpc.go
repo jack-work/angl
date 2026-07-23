@@ -89,6 +89,16 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 		}
 		return rpcOK(req.ID, "ok")
 
+	case "sing":
+		var p nameParam
+		if err := parseParams(req.Params, &p); err != nil {
+			return rpcErr(req.ID, -32602, err.Error())
+		}
+		if err := d.SingAngl(p.Name); err != nil {
+			return rpcErr(req.ID, -32000, err.Error())
+		}
+		return rpcOK(req.ID, "ok")
+
 	case "reload":
 		result, err := d.Reload()
 		if err != nil {

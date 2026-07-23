@@ -58,6 +58,10 @@ func main() {
 		err = withName(os.Args[2:], func(name string) error {
 			return rpcOKMsg("restart", nameP(name), "restarted %s", name)
 		})
+	case "sing":
+		err = withName(os.Args[2:], func(name string) error {
+			return rpcOKMsg("sing", nameP(name), "sang %s", name)
+		})
 	case "reload":
 		err = rpcPrint("reload", nil)
 	case "enable":
@@ -625,6 +629,7 @@ Process control:
   start <name>              Start an angl
   stop <name>               Stop an angl
   restart <name>            Restart an angl
+  sing <name>               Run a backoff angl now; advance its retry timer
 
 Configuration:
   reload                    Re-read config, reconcile running state
@@ -671,6 +676,10 @@ Catalog: ~/.config/angl/catalog.json
 Listen keys:
   Up/k, Down/j   Move selection
   Home/g, End/G  Jump to first/last angl
+  Enter          Toggle full wrapped details for visible columns
+  s              Sing when in backoff; stop otherwise
+  d              Disable configured angl
+  u              Unregister transient angl
   q, Esc, Ctrl-C Quit
 
 Semantics:

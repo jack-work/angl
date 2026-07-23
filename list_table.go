@@ -3,6 +3,7 @@
 package main
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -79,6 +80,66 @@ func renderListTableWithSelection(statuses []daemon.ProcessStatus, store catalog
 		t.Style().Size.WidthMax = width
 	}
 	return t.Render()
+}
+
+// renderListDetail shows the selected record using the same responsive column
+// set as the inventory table. Unlike the compact rows, every visible value is
+// retained and wrapped within its column.
+func renderListDetail(item daemon.InventoryItem, width int) string {
+	status := item.ProcessStatus
+	pid := "-"
+	if status.PID > 0 {
+		pid = strconv.Itoa(status.PID)
+	}
+	uptime := status.Uptime
+	if status.State == daemon.StateBackoff && status.NextRunIn != "" {
+		uptime = "next " + status.NextRunIn
+	} else if uptime == "" {
+		uptime = status.Lifetime
+	}
+	if uptime == "" {
+		uptime = "-"
+	}
+	restarts := strconv.Itoa(status.Restarts)
+	if status.MaxRestarts > 0 {
+		restarts += "/" + strconv.Itoa(status.MaxRestarts)
+	}
+
+	t := table.NewWriter()
+	t.SetStyle(table.StyleRounded)
+	t.AppendHeader(table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS", "COMMAND", "CHARGE", "METADATA"})
+	t.AppendRow(table.Row{
+		sanitizeCell(status.Name, 0), sanitizeCell(string(status.State), 0), pid, uptime, restarts,
+		sanitizeCell(formatCommand(status.Command, status.Args), 0),
+		sanitizeCell(status.Charge, 0), formatLabelsFull(item.Metadata),
+	})
+	configs := listColumnConfigs(width)
+	for index := range configs {
+		if !configs[index].Hidden {
+			configs[index].WidthMaxEnforcer = text.WrapHard
+		}
+	}
+	t.SetColumnConfigs(configs)
+	if width > 0 {
+		t.Style().Size.WidthMax = width
+	}
+	return t.Render()
+}
+
+func formatLabelsFull(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+labels[key])
+	}
+	return sanitizeCell(strings.Join(parts, ","), 0)
 }
 
 func listColumnConfigs(width int) []table.ColumnConfig {
