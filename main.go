@@ -22,7 +22,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.8.0"
+const version = "0.9.0"
 
 const (
 	detachedProcess = 0x00000008
