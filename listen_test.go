@@ -77,25 +77,103 @@ func TestListenEnterExpandsFullVisibleDetails(t *testing.T) {
 	}
 }
 
-func TestListenSIsContextualSingOrStop(t *testing.T) {
-	for _, tt := range []struct {
-		state daemon.ProcessState
-		want  string
-	}{
-		{state: daemon.StateBackoff, want: "sing"},
-		{state: daemon.StateRunning, want: "stop"},
-	} {
-		t.Run(string(tt.state), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			model := newListenModel(ctx, cancel)
-			model.items["api"] = daemon.InventoryItem{ProcessStatus: daemon.ProcessStatus{Name: "api", State: tt.state}}
-			updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-			got := updated.(listenModel)
-			if got.action != tt.want || cmd == nil {
-				t.Fatalf("action = %q, cmd nil = %v; want %q and command", got.action, cmd == nil, tt.want)
-			}
-		})
+func TestListenActionsUseRealCLIVerbs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := newListenModel(ctx, cancel)
+	model.items["api"] = daemon.InventoryItem{ProcessStatus: daemon.ProcessStatus{Name: "api", State: daemon.StateBackoff}}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	got := updated.(listenModel)
+	if got.action != "exec" || cmd == nil {
+		t.Fatalf("exec action = %q, cmd nil = %v", got.action, cmd == nil)
+	}
+
+	model.action = ""
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	got = updated.(listenModel)
+	if got.action != "stop" || cmd == nil {
+		t.Fatalf("stop action = %q, cmd nil = %v", got.action, cmd == nil)
+	}
+}
+
+func TestListenSpaceVisualAndEscapeSelection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := newListenModel(ctx, cancel)
+	for _, name := range []string{"a", "b", "c"} {
+		model.items[name] = daemon.InventoryItem{ProcessStatus: daemon.ProcessStatus{Name: name}}
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = updated.(listenModel)
+	if !model.marked["a"] {
+		t.Fatal("space did not select current row")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	model = updated.(listenModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(listenModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(listenModel)
+	for _, name := range []string{"a", "b", "c"} {
+		if !model.marked[name] {
+			t.Fatalf("visual selection missing %s: %#v", name, model.marked)
+		}
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(listenModel)
+	if len(model.marked) != 0 || model.visual {
+		t.Fatalf("escape did not clear selection: %#v", model.marked)
+	}
+}
+
+func TestListenGGAndGNavigate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := newListenModel(ctx, cancel)
+	for _, name := range []string{"a", "b", "c"} {
+		model.items[name] = daemon.InventoryItem{ProcessStatus: daemon.ProcessStatus{Name: name}}
+	}
+	model.selected = 1
+	for _, key := range []rune{'g', 'g'} {
+		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		model = updated.(listenModel)
+	}
+	if model.selected != 0 {
+		t.Fatalf("gg selected %d, want 0", model.selected)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if got := updated.(listenModel).selected; got != 2 {
+		t.Fatalf("G selected %d, want 2", got)
+	}
+}
+
+func TestListenDeleteConfirmationDefaultsToNo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := newListenModel(ctx, cancel)
+	model.items["api"] = daemon.InventoryItem{ProcessStatus: daemon.ProcessStatus{Name: "api"}}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = updated.(listenModel)
+	if model.confirm == nil || model.confirm.yes {
+		t.Fatal("delete confirmation missing or did not default to No")
+	}
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(listenModel)
+	if model.confirm != nil || cmd != nil || model.action != "" {
+		t.Fatal("Enter on default No did not cancel")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = updated.(listenModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model = updated.(listenModel)
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(listenModel)
+	if model.action != "delete" || cmd == nil {
+		t.Fatalf("confirmed delete action = %q, cmd nil = %v", model.action, cmd == nil)
 	}
 }
 

@@ -126,47 +126,6 @@ func SaveConfig(path string, cfg Config) error {
 	return writeFileAtomic(path, append(data, '\n'))
 }
 
-func DefaultTransientPath() string {
-	return filepath.Join(DefaultConfigDir(), "transient.json")
-}
-
-func LoadTransient(path string) (map[string]AnglDef, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]AnglDef), nil
-		}
-		return nil, err
-	}
-	var m map[string]AnglDef
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
-	}
-	if m == nil {
-		m = make(map[string]AnglDef)
-	}
-	for name, def := range m {
-		if err := ValidateName(name); err != nil {
-			return nil, err
-		}
-		if err := def.Validate(); err != nil {
-			return nil, fmt.Errorf("transient angl %q: %w", name, err)
-		}
-	}
-	return m, nil
-}
-
-func SaveTransient(path string, m map[string]AnglDef) error {
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	return writeFileAtomic(path, append(data, '\n'))
-}
-
 func writeFileAtomic(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+"-*.tmp")
 	if err != nil {

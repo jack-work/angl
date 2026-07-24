@@ -23,7 +23,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.9.1"
+const version = "0.10.0"
 
 const (
 	detachedProcess     = 0x00000008
@@ -56,21 +56,13 @@ func main() {
 		err = cmdListenArgs(os.Args[2:])
 	case "status":
 		err = withName(os.Args[2:], cmdStatus)
-	case "start":
+	case "exec":
 		err = withName(os.Args[2:], func(name string) error {
-			return rpcOKMsg("start", nameP(name), "started %s", name)
+			return rpcOKMsg("exec", nameP(name), "executed %s", name)
 		})
 	case "stop":
 		err = withName(os.Args[2:], func(name string) error {
 			return rpcOKMsg("stop", nameP(name), "stopped %s", name)
-		})
-	case "restart":
-		err = withName(os.Args[2:], func(name string) error {
-			return rpcOKMsg("restart", nameP(name), "restarted %s", name)
-		})
-	case "sing":
-		err = withName(os.Args[2:], func(name string) error {
-			return rpcOKMsg("sing", nameP(name), "sang %s", name)
 		})
 	case "reload":
 		err = rpcPrint("reload", nil)
@@ -84,9 +76,9 @@ func main() {
 		})
 	case "register":
 		err = cmdRegister(os.Args[2:])
-	case "unregister":
+	case "delete":
 		err = withName(os.Args[2:], func(name string) error {
-			return rpcOKMsg("unregister", nameP(name), "unregistered %s", name)
+			return rpcOKMsg("delete", nameP(name), "deleted %s", name)
 		})
 	case "tail":
 		err = cmdTailArgs(os.Args[2:])
@@ -663,7 +655,7 @@ done:
 	if err != nil {
 		return err
 	}
-	fmt.Printf("registered %s (start with: angl start %s)\n", name, name)
+	fmt.Printf("registered %s (run with: angl exec %s; enable for automatic startup)\n", name, name)
 	return nil
 }
 
@@ -680,19 +672,15 @@ Process control:
   ls, list [--json] [-l <selector>]   List angls with metadata
   listen, watch                        Live interactive angl inventory
   status <name>             Detailed status of an angl
-  start <name>              Start an angl
-  stop <name>               Stop an angl
-  restart <name>            Restart an angl
-  sing <name>               Run a backoff angl now; advance its retry timer
+  exec <name>               Run now, including disabled/backoff/failed angls
+  stop <name>               Stop a running angl
 
 Configuration:
   reload                    Re-read config, reconcile running state
+  register <name> [flags] -- <cmd> [args...]   Add a disabled angl to config
+  delete <name>                                Delete an angl from config
   enable <name>             Enable an angl (updates config + starts)
   disable <name>            Disable an angl (updates config + stops)
-
-Transient:
-  register <name> [flags] -- <cmd> [args...]   Register a transient angl
-  unregister <name>                            Remove a transient angl
 
   Register flags:
     --interval <dur>        Run periodically (e.g. 45m, 1h)
@@ -724,17 +712,17 @@ Other:
   help                      Print this help
 
 Config: ~/.config/angl/config.json
-Transient: ~/.config/angl/transient.json
 Catalog: ~/.config/angl/catalog.json
 
 Listen keys:
-  Up/k, Down/j   Move selection
-  Home/g, End/G  Jump to first/last angl
-  Enter          Toggle full wrapped details for visible columns
-  s              Sing when in backoff; stop otherwise
-  d              Disable configured angl
-  u              Unregister transient angl
-  q, Esc, Ctrl-C Quit
+  j/k, arrows    Move cursor; h/l collapse/expand details
+  gg/G           Jump to first/last angl
+  Space          Toggle row selection; v starts visual selection
+  Enter          Toggle full wrapped details
+  e/s            Exec or stop selected angls
+  + / -          Enable or disable selected angls
+  d/Delete       Delete selected angls after confirmation
+  Esc            Clear selection; ? shows help; q/Ctrl-C quits
 
 Semantics:
   Persistent process (no interval): runs continuously, restarts on crash

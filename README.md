@@ -69,16 +69,19 @@ Daemon-backed commands automatically start the daemon when it is not running. Th
 # List output includes the executable, argument array, and a complete reconstructed command line
 .\angl.exe ls --json
 .\angl.exe status my-api
-.\angl.exe start my-api
+
+# Exec runs now from stopped, disabled, backoff, or failed state.
+# It rejects an angl that is already starting or running.
+.\angl.exe exec my-api
+
+# Stop accepts only an angl that is currently running.
 .\angl.exe stop my-api
-.\angl.exe restart my-api
-.\angl.exe sing my-api       # if backoff: run now, then continue normal retry progression
 .\angl.exe tail my-api
 
 # Reconcile edits to config.json
 .\angl.exe reload
 
-# Persist enabled=false/true for config-defined processes
+# Persist enabled=false/true; enable also starts and disable also stops.
 .\angl.exe disable my-api
 .\angl.exe enable my-api
 
@@ -86,7 +89,9 @@ Daemon-backed commands automatically start the daemon when it is not running. Th
 .\angl.exe uninstall
 ```
 
-`angl listen` is a separate TUI client process. It registers a long-lived listener over the existing named-pipe RPC connection, receives an initial versioned snapshot, then applies delta-compressed upsert/remove patches. The daemon may send a full structured snapshot when it is smaller or when a slow client needs recovery. New and changed rows carry a `*` marker for three seconds; metadata edits are included in the same stream. Use arrow keys or `j`/`k` to move, Enter to toggle full wrapped details for the columns visible at the current terminal width, `s` to sing an angl in backoff (or stop one in any other state), `d` to disable, `u` to unregister, and `q` or Escape to quit. Mutations use ordinary RPC calls and report success or failure in the TUI.
+`angl listen` is a separate TUI client process. It registers a long-lived listener over the existing named-pipe RPC connection, receives an initial versioned snapshot, then applies delta-compressed upsert/remove patches. The daemon may send a full structured snapshot when it is smaller or when a slow client needs recovery. New and changed rows carry a `*` marker for three seconds; metadata edits are included in the same stream.
+
+The TUI uses the same verbs as the CLI. Move with `j`/`k` or arrows, use `h`/`l` to collapse or expand details, Enter to toggle details, `gg`/`G` for the first or last row, and `?` for help. Space toggles individual rows; `v` starts a visual range selection, and Escape clears selection. Actions apply to selected rows (or the cursor when none are selected): `e` execs, `s` stops, `+`/`-` enables or disables, and `d` or Delete opens a confirmation modal before deletion. The destructive modal defaults to No. Quit with `q` or Ctrl-C.
 
 `angl ls` sizes itself to the current terminal. On narrower terminals it snips cells and progressively omits secondary columns rather than wrapping beyond the viewport; `angl ls --json` preserves exact `command` and `args` fields plus a complete, Windows-quoted `command_line` string for every process.
 
@@ -139,17 +144,16 @@ angl view delete dracarys
 
 Following is rotation- and truncation-aware, bounded in memory, and reads all log files read-only.
 
-### Temporary registrations
+### Register and delete
 
-A registration is stored in `transient.json` but does not auto-start after daemon restart:
+Every angl is stored in `config.json`. `register` creates a disabled definition so creation does not unexpectedly launch a process. Use `exec` for a one-time run or `enable` to persist automatic startup intent. `delete` removes the definition after stopping any owned process.
 
 ```powershell
 .\angl.exe register scratch-api --max-restarts 5 --charge "Temporary API" -- C:\tools\api.exe --port 9000
-.\angl.exe start scratch-api
-.\angl.exe unregister scratch-api
+.\angl.exe exec scratch-api
+.\angl.exe enable scratch-api
+.\angl.exe delete scratch-api
 ```
-
-Move stable definitions into `config.json` so their startup intent is explicit and versionable.
 
 ## Design
 
@@ -167,7 +171,7 @@ The design favors a small operational surface:
 - **Local-only control.** A named pipe avoids reserving a TCP port and exposing an unauthenticated HTTP service.
 - **Direct execution.** Commands are executed without a shell, reducing quoting surprises and injection risk.
 - **Whole-tree stop.** Windows `taskkill /T /F` stops descendants as well as the direct child.
-- **Simple state.** Durable definitions are JSON; transient registrations are separate; logs are ordinary files.
+- **Simple state.** Every angl definition is durable JSON in one config file; logs are ordinary files.
 
 ### Intentional limitations
 

@@ -17,10 +17,10 @@ import (
 // lossless; the human table progressively drops secondary columns and snips
 // cells as the terminal narrows.
 func renderListTable(statuses []daemon.ProcessStatus, store catalog.Store, width int) string {
-	return renderListTableWithSelection(statuses, store, width, -1)
+	return renderListTableWithSelection(statuses, store, width, -1, nil)
 }
 
-func renderListTableWithSelection(statuses []daemon.ProcessStatus, store catalog.Store, width, selected int) string {
+func renderListTableWithSelection(statuses []daemon.ProcessStatus, store catalog.Store, width, selected int, marked map[string]bool) string {
 	t := table.NewWriter()
 	t.SetStyle(table.StyleRounded)
 	t.AppendHeader(table.Row{"NAME", "STATE", "PID", "UPTIME", "RESTARTS", "COMMAND", "CHARGE", "METADATA"})
@@ -65,9 +65,17 @@ func renderListTableWithSelection(statuses []daemon.ProcessStatus, store catalog
 			sanitizeCell(status.Charge, 0), formatLabels(store.Labels[status.Name]),
 		})
 	}
-	if selectedName != "" {
+	if selectedName != "" || len(marked) > 0 {
 		t.SetRowPainter(func(row table.Row) text.Colors {
-			if name, ok := row[0].(string); ok && text.StripEscape(name) == sanitizeCell(selectedName, 0) {
+			name, ok := row[0].(string)
+			if !ok {
+				return nil
+			}
+			plainName := text.StripEscape(name)
+			if marked[plainName] {
+				return text.Colors{text.BgBlue, text.FgHiWhite}
+			}
+			if plainName == sanitizeCell(selectedName, 0) {
 				return text.Colors{text.BgHiBlack}
 			}
 			return nil

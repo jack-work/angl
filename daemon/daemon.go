@@ -14,16 +14,14 @@ import (
 )
 
 type Daemon struct {
-	mu            sync.RWMutex
-	ctx           context.Context
-	config        Config
-	configPath    string
-	processes     map[string]*Process
-	transient     map[string]AnglDef
-	transientPath string
-	logger        *log.Logger
-	logFile       *os.File
-	inventory     inventoryStream
+	mu         sync.RWMutex
+	ctx        context.Context
+	config     Config
+	configPath string
+	processes  map[string]*Process
+	logger     *log.Logger
+	logFile    *os.File
+	inventory  inventoryStream
 }
 
 func New(configPath string) (*Daemon, error) {
@@ -46,27 +44,18 @@ func New(configPath string) (*Daemon, error) {
 
 	logger := log.New(io.MultiWriter(logFile, os.Stderr), "[angld] ", log.LstdFlags)
 
-	transientPath := DefaultTransientPath()
-	transient, err := LoadTransient(transientPath)
-	if err != nil {
-		logger.Printf("warning: load transient: %v", err)
-		transient = make(map[string]AnglDef)
-	}
-
 	return &Daemon{
-		config:        cfg,
-		configPath:    configPath,
-		processes:     make(map[string]*Process),
-		transient:     transient,
-		transientPath: transientPath,
-		logger:        logger,
-		logFile:       logFile,
+		config:     cfg,
+		configPath: configPath,
+		processes:  make(map[string]*Process),
+		logger:     logger,
+		logFile:    logFile,
 	}, nil
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
-	d.logger.Printf("starting (%d configured angls, %d transient angls)", len(d.config.Angls), len(d.transient))
+	d.logger.Printf("starting (%d angls)", len(d.config.Angls))
 	if d.logFile != nil {
 		defer d.logFile.Close()
 	}
@@ -78,15 +67,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if def.IsEnabled() {
 			p.Start(ctx)
 		}
-	}
-	for name, def := range d.transient {
-		if _, exists := d.processes[name]; exists {
-			d.logger.Printf("[%s] transient skipped (name conflict with config)", name)
-			continue
-		}
-		p := NewProcess(name, def, d.logger)
-		d.processes[name] = p
-		d.logger.Printf("[%s] transient loaded (stopped)", name)
 	}
 	d.mu.Unlock()
 
@@ -132,48 +112,31 @@ func (d *Daemon) StatusOf(name string) (ProcessStatus, error) {
 	return p.Status(), nil
 }
 
-func (d *Daemon) StartAngl(name string) error {
+func (d *Daemon) ExecAngl(name string) error {
 	d.mu.RLock()
+	defer d.mu.RUnlock()
 	p, ok := d.processes[name]
-	d.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("unknown angl %q", name)
 	}
-	p.Start(d.ctx)
-	d.logger.Printf("started %s", name)
+	if err := p.Exec(d.ctx); err != nil {
+		return err
+	}
+	d.logger.Printf("executed %s", name)
 	return nil
 }
 
 func (d *Daemon) StopAngl(name string) error {
 	d.mu.RLock()
+	defer d.mu.RUnlock()
 	p, ok := d.processes[name]
-	d.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("unknown angl %q", name)
 	}
-	p.Stop()
+	if err := p.StopRunning(); err != nil {
+		return err
+	}
 	d.logger.Printf("stopped %s", name)
-	return nil
-}
-
-func (d *Daemon) RestartAngl(name string) error {
-	if err := d.StopAngl(name); err != nil {
-		return err
-	}
-	return d.StartAngl(name)
-}
-
-func (d *Daemon) SingAngl(name string) error {
-	d.mu.RLock()
-	p, ok := d.processes[name]
-	d.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("unknown angl %q", name)
-	}
-	if err := p.Sing(); err != nil {
-		return err
-	}
-	d.logger.Printf("sung %s", name)
 	return nil
 }
 
@@ -190,11 +153,9 @@ func (d *Daemon) Reload() (ReloadResult, error) {
 
 	for name, p := range d.processes {
 		if _, ok := cfg.Angls[name]; !ok {
-			if _, isTransient := d.transient[name]; !isTransient {
-				p.Stop()
-				delete(d.processes, name)
-				result.Removed = append(result.Removed, name)
-			}
+			p.Stop()
+			delete(d.processes, name)
+			result.Removed = append(result.Removed, name)
 		}
 	}
 
@@ -230,11 +191,6 @@ func (d *Daemon) Reload() (ReloadResult, error) {
 func (d *Daemon) Enable(name string) error {
 	d.mu.Lock()
 
-	if _, transient := d.transient[name]; transient {
-		d.mu.Unlock()
-		return fmt.Errorf("%q is transient; use start/stop (or move it to config for auto-start)", name)
-	}
-
 	def, ok := d.config.Angls[name]
 	if !ok {
 		d.mu.Unlock()
@@ -265,11 +221,6 @@ func (d *Daemon) Enable(name string) error {
 
 func (d *Daemon) Disable(name string) error {
 	d.mu.Lock()
-
-	if _, transient := d.transient[name]; transient {
-		d.mu.Unlock()
-		return fmt.Errorf("%q is transient; use start/stop (or unregister it)", name)
-	}
 
 	def, ok := d.config.Angls[name]
 	if !ok {
@@ -312,50 +263,42 @@ func (d *Daemon) Register(name string, def AnglDef) error {
 	defer d.mu.Unlock()
 
 	if _, ok := d.config.Angls[name]; ok {
-		return fmt.Errorf("%q already exists in config", name)
-	}
-	if _, ok := d.transient[name]; ok {
-		return fmt.Errorf("%q already registered as transient", name)
+		return fmt.Errorf("angl %q already exists", name)
 	}
 
 	disabled := false
 	def.Enabled = &disabled
-
-	d.transient[name] = def
-	if err := SaveTransient(d.transientPath, d.transient); err != nil {
-		delete(d.transient, name)
-		return fmt.Errorf("save transient: %w", err)
+	d.config.Angls[name] = def
+	if err := SaveConfig(d.configPath, d.config); err != nil {
+		delete(d.config.Angls, name)
+		return fmt.Errorf("save config: %w", err)
 	}
 
-	p := NewProcess(name, def, d.logger)
-	d.processes[name] = p
-
-	d.logger.Printf("registered transient %s", name)
+	d.processes[name] = NewProcess(name, def, d.logger)
+	d.logger.Printf("registered %s", name)
 	return nil
 }
 
-func (d *Daemon) Unregister(name string) error {
+func (d *Daemon) Delete(name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if _, ok := d.config.Angls[name]; ok {
-		return fmt.Errorf("%q is in config (use disable instead)", name)
-	}
-	if _, ok := d.transient[name]; !ok {
-		return fmt.Errorf("%q is not a transient angl", name)
+	def, ok := d.config.Angls[name]
+	if !ok {
+		return fmt.Errorf("unknown angl %q", name)
 	}
 
-	if p, ok := d.processes[name]; ok {
+	delete(d.config.Angls, name)
+	if err := SaveConfig(d.configPath, d.config); err != nil {
+		d.config.Angls[name] = def
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	if p := d.processes[name]; p != nil {
 		p.Stop()
 		delete(d.processes, name)
 	}
-
-	delete(d.transient, name)
-	if err := SaveTransient(d.transientPath, d.transient); err != nil {
-		d.logger.Printf("warning: save transient: %v", err)
-	}
-
-	d.logger.Printf("unregistered %s", name)
+	d.logger.Printf("deleted %s", name)
 	return nil
 }
 

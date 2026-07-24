@@ -1,9 +1,8 @@
 //go:build windows
 
 // Package catalog provides process-independent metadata and saved selectors for
-// angls. Its JSON store is deliberately separate from daemon config and
-// transient state, so annotation and query never reconcile or restart a process
-// and can be used with an already-running older daemon.
+// angls. Its JSON store is deliberately separate from daemon config, so
+// annotation and query never reconcile or restart a process.
 package catalog
 
 import (

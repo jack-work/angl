@@ -100,8 +100,42 @@ func TestSaveConfigReplacesExistingFile(t *testing.T) {
 	}
 }
 
-func TestSingWakesCurrentBackoffWait(t *testing.T) {
-	process := NewProcess("singer", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
+func TestRegisterAndDeleteUseConfigAsOnlyRegistry(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	daemon := &Daemon{
+		ctx:        context.Background(),
+		config:     Config{Angls: make(map[string]AnglDef)},
+		configPath: configPath,
+		processes:  make(map[string]*Process),
+		logger:     log.New(io.Discard, "", 0),
+	}
+	if err := daemon.Register("worker", AnglDef{Command: "worker.exe", Charge: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Angls["worker"].IsEnabled() {
+		t.Fatal("newly registered angl should be disabled until explicitly enabled")
+	}
+	if got := daemon.processes["worker"].Status().State; got != StateDisabled {
+		t.Fatalf("registered state = %s, want disabled", got)
+	}
+	if err := daemon.Delete("worker"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Angls) != 0 || len(daemon.processes) != 0 {
+		t.Fatalf("delete left config/processes behind: %#v %#v", stored.Angls, daemon.processes)
+	}
+}
+
+func TestExecWakesCurrentBackoffWait(t *testing.T) {
+	process := NewProcess("waiting", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
 	process.mu.Lock()
 	wake := process.beginBackoffLocked(time.Now(), time.Hour)
 	process.mu.Unlock()
@@ -109,35 +143,114 @@ func TestSingWakesCurrentBackoffWait(t *testing.T) {
 	waited := make(chan bool, 1)
 	go func() { waited <- process.wait(context.Background(), time.Hour, wake) }()
 
-	if err := process.Sing(); err != nil {
+	if err := process.Exec(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case completed := <-waited:
 		if !completed {
-			t.Fatal("sung wait reported cancellation")
+			t.Fatal("forced wait reported cancellation")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("sing did not wake backoff")
-	}
-	if err := process.Sing(); err == nil {
-		t.Fatal("second sing unexpectedly succeeded outside an active backoff wait")
+		t.Fatal("exec did not wake backoff")
 	}
 }
 
-func TestSingRejectsNonBackoffState(t *testing.T) {
-	process := NewProcess("quiet", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
-	if err := process.Sing(); err == nil {
-		t.Fatal("sing unexpectedly accepted a stopped angl")
+func TestExecRejectsStartingAndRunning(t *testing.T) {
+	for _, state := range []ProcessState{StateStarting, StateRunning} {
+		process := NewProcess("busy", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
+		process.state = state
+		if err := process.Exec(context.Background()); err == nil {
+			t.Fatalf("Exec unexpectedly accepted %s", state)
+		}
 	}
 }
 
-func TestSingUsesNormalBackoffProgression(t *testing.T) {
-	if got, want := nextBackoff(initialBackoff), 4*time.Second; got != want {
-		t.Fatalf("next backoff after a sung initial wait = %v, want %v", got, want)
+func TestExecRunsDisabledAndFailedAngls(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		enabled bool
+		state   ProcessState
+		final   ProcessState
+	}{
+		{name: "disabled", enabled: false, state: StateDisabled, final: StateDisabled},
+		{name: "failed", enabled: true, state: StateFailed, final: StateStopped},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			enabled := tt.enabled
+			process := NewProcess(tt.name, AnglDef{
+				Command: "cmd.exe",
+				Args:    []string{"/d", "/c", "ping -n 30 127.0.0.1 >nul"},
+				Enabled: &enabled,
+			}, log.New(io.Discard, "", 0))
+			process.state = tt.state
+			if err := process.Exec(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			waitForProcessState(t, process, StateRunning)
+			if process.Status().Enabled != tt.enabled {
+				t.Fatal("exec mutated durable enabled state")
+			}
+			if err := process.StopRunning(); err != nil {
+				t.Fatal(err)
+			}
+			if got := process.Status().State; got != tt.final {
+				t.Fatalf("state after stop = %s, want %s", got, tt.final)
+			}
+		})
 	}
-	if got := nextBackoff(maxBackoff); got != maxBackoff {
-		t.Fatalf("capped next backoff = %v, want %v", got, maxBackoff)
+}
+
+func waitForProcessState(t *testing.T, process *Process, want ProcessState) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if process.Status().State == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("state = %s, want %s", process.Status().State, want)
+}
+
+func TestConcurrentExecStartsOnlyOneLoop(t *testing.T) {
+	process := NewProcess("once", AnglDef{Command: "cmd.exe", Args: []string{"/d", "/c", "ping -n 30 127.0.0.1 >nul"}}, log.New(io.Discard, "", 0))
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- process.Exec(context.Background())
+		}()
+	}
+	close(start)
+	accepted := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted execs = %d, want 1", accepted)
+	}
+	process.Stop()
+}
+
+func TestStopRunningRejectsEveryNonRunningState(t *testing.T) {
+	for _, state := range []ProcessState{StateDisabled, StateStopped, StateStarting, StateBackoff, StateFailed} {
+		process := NewProcess("quiet", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
+		process.state = state
+		if err := process.StopRunning(); err == nil {
+			t.Fatalf("StopRunning unexpectedly accepted %s", state)
+		}
+	}
+
+	process := NewProcess("live", AnglDef{Command: "tool.exe"}, log.New(io.Discard, "", 0))
+	process.state = StateRunning
+	process.done = make(chan struct{})
+	close(process.done)
+	if err := process.StopRunning(); err != nil {
+		t.Fatalf("StopRunning rejected running process: %v", err)
 	}
 }
 

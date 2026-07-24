@@ -59,12 +59,12 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 		}
 		return rpcOK(req.ID, s)
 
-	case "start":
+	case "exec":
 		var p nameParam
 		if err := parseParams(req.Params, &p); err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
-		if err := d.StartAngl(p.Name); err != nil {
+		if err := d.ExecAngl(p.Name); err != nil {
 			return rpcErr(req.ID, -32000, err.Error())
 		}
 		return rpcOK(req.ID, "ok")
@@ -75,26 +75,6 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
 		if err := d.StopAngl(p.Name); err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, "ok")
-
-	case "restart":
-		var p nameParam
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		if err := d.RestartAngl(p.Name); err != nil {
-			return rpcErr(req.ID, -32000, err.Error())
-		}
-		return rpcOK(req.ID, "ok")
-
-	case "sing":
-		var p nameParam
-		if err := parseParams(req.Params, &p); err != nil {
-			return rpcErr(req.ID, -32602, err.Error())
-		}
-		if err := d.SingAngl(p.Name); err != nil {
 			return rpcErr(req.ID, -32000, err.Error())
 		}
 		return rpcOK(req.ID, "ok")
@@ -144,15 +124,15 @@ func (d *Daemon) HandleRPC(req RPCRequest) RPCResponse {
 		}
 		return rpcOK(req.ID, "registered")
 
-	case "unregister":
+	case "delete":
 		var p nameParam
 		if err := parseParams(req.Params, &p); err != nil {
 			return rpcErr(req.ID, -32602, err.Error())
 		}
-		if err := d.Unregister(p.Name); err != nil {
+		if err := d.Delete(p.Name); err != nil {
 			return rpcErr(req.ID, -32000, err.Error())
 		}
-		return rpcOK(req.ID, "unregistered")
+		return rpcOK(req.ID, "deleted")
 
 	default:
 		return rpcErr(req.ID, -32601, fmt.Sprintf("unknown method %q", req.Method))

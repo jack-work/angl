@@ -68,9 +68,10 @@ type Process struct {
 	restarts int
 	logger   *log.Logger
 
-	cancel context.CancelFunc
-	done   chan struct{}
-	wake   chan struct{}
+	cancel     context.CancelFunc
+	done       chan struct{}
+	wake       chan struct{}
+	generation uint64
 }
 
 func NewProcess(name string, def AnglDef, logger *log.Logger) *Process {
@@ -92,14 +93,45 @@ func (p *Process) Start(parentCtx context.Context) {
 		p.mu.Unlock()
 		return
 	}
+	p.startLocked(parentCtx)
+	p.mu.Unlock()
+}
+
+// Exec runs an angl immediately. It deliberately ignores enabled, failed, and
+// backoff state, but never creates a second copy of a starting or running angl.
+func (p *Process) Exec(parentCtx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch p.state {
+	case StateRunning, StateStarting:
+		return fmt.Errorf("angl %q is already running", p.name)
+	case StateBackoff:
+		if p.wake == nil {
+			return fmt.Errorf("angl %q is changing state; try again", p.name)
+		}
+		close(p.wake)
+		p.wake = nil
+		p.nextRun = time.Now()
+		p.logger.Printf("[%s] exec forced current wait", p.name)
+		return nil
+	default:
+		p.startLocked(parentCtx)
+		return nil
+	}
+}
+
+func (p *Process) startLocked(parentCtx context.Context) {
 	p.restarts = 0
+	p.nextRun = time.Time{}
 	p.state = StateStarting
 	ctx, cancel := context.WithCancel(parentCtx)
 	p.cancel = cancel
 	p.done = make(chan struct{})
-	p.mu.Unlock()
-
-	go p.runLoop(ctx)
+	p.generation++
+	generation := p.generation
+	done := p.done
+	go p.runLoop(ctx, generation, done)
 }
 
 func (p *Process) Stop() {
@@ -107,29 +139,33 @@ func (p *Process) Stop() {
 	cancel := p.cancel
 	done := p.done
 	p.mu.Unlock()
+	stopProcess(cancel, done)
+}
 
+// StopRunning implements the public stop contract: only a process that has
+// reached running state can be stopped. Internal reconciliation still uses
+// Stop so it can cancel starting and waiting processes safely.
+func (p *Process) StopRunning() error {
+	p.mu.Lock()
+	if p.state != StateRunning {
+		state := p.state
+		p.mu.Unlock()
+		return fmt.Errorf("angl %q is not running (state: %s)", p.name, state)
+	}
+	cancel := p.cancel
+	done := p.done
+	p.mu.Unlock()
+	stopProcess(cancel, done)
+	return nil
+}
+
+func stopProcess(cancel context.CancelFunc, done <-chan struct{}) {
 	if cancel != nil {
 		cancel()
 	}
 	if done != nil {
 		<-done
 	}
-}
-
-// Sing wakes an angl whose retry or heartbeat timer is in backoff. The run
-// loop proceeds exactly as if that timer had elapsed, including advancing the
-// exponential retry period after the attempted run.
-func (p *Process) Sing() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.state != StateBackoff || p.wake == nil {
-		return fmt.Errorf("%q is not in backoff (state: %s)", p.name, p.state)
-	}
-	close(p.wake)
-	p.wake = nil
-	p.nextRun = time.Now()
-	p.logger.Printf("[%s] sung; running now", p.name)
-	return nil
 }
 
 func (p *Process) Status() ProcessStatus {
@@ -174,21 +210,24 @@ func (p *Process) Status() ProcessStatus {
 	return s
 }
 
-func (p *Process) runLoop(ctx context.Context) {
+func (p *Process) runLoop(ctx context.Context, generation uint64, done chan struct{}) {
 	defer func() {
 		p.mu.Lock()
-		if p.state != StateFailed {
-			p.state = StateStopped
+		if p.generation == generation {
+			if p.state != StateFailed {
+				if p.def.IsEnabled() {
+					p.state = StateStopped
+				} else {
+					p.state = StateDisabled
+				}
+			}
+			p.pid = 0
+			p.done = nil
+			p.cancel = nil
+			p.wake = nil
 		}
-		p.pid = 0
-		d := p.done
-		p.done = nil
-		p.cancel = nil
-		p.wake = nil
 		p.mu.Unlock()
-		if d != nil {
-			close(d)
-		}
+		close(done)
 	}()
 
 	backoff := initialBackoff
@@ -326,8 +365,8 @@ func (p *Process) runLoop(ctx context.Context) {
 }
 
 // beginBackoffLocked records a distinct wake channel for this wait. Callers
-// must hold p.mu. A per-wait channel prevents a late sing from leaking into a
-// later backoff period.
+// must hold p.mu. A per-wait channel prevents a late forced exec from leaking
+// into a later backoff period.
 func (p *Process) beginBackoffLocked(now time.Time, d time.Duration) <-chan struct{} {
 	wake := make(chan struct{})
 	p.state = StateBackoff
@@ -336,8 +375,8 @@ func (p *Process) beginBackoffLocked(now time.Time, d time.Duration) <-chan stru
 	return wake
 }
 
-// wait returns true if the duration elapsed or the angl was sung, and false
-// only when the process context was cancelled.
+// wait returns true if the duration elapsed or exec forced the angl to run,
+// and false only when the process context was cancelled.
 func (p *Process) wait(ctx context.Context, d time.Duration, wake <-chan struct{}) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -348,7 +387,7 @@ func (p *Process) wait(ctx context.Context, d time.Duration, wake <-chan struct{
 	case <-ctx.Done():
 		completed = false
 	}
-	// Cancellation wins if it raced with either timer completion or sing. This
+	// Cancellation wins if it raced with either timer completion or forced exec. This
 	// prevents Stop from allowing one final launch when both channels are ready.
 	if ctx.Err() != nil {
 		completed = false
